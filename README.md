@@ -48,7 +48,7 @@ http://127.0.0.1:9011
 
 ### Container image
 
-Each push to `main` builds the image and publishes it to GitHub Container Registry:
+Each push to `main` builds `linux/amd64` and `linux/arm64` images and publishes them to GitHub Container Registry:
 
 ```bash
 docker pull ghcr.io/harrykodden/api-flow-tester:latest
