@@ -1,0 +1,50 @@
+{
+  "base_url": "http://localhost:8080",
+  "random_generators": {
+    "email": {
+      "type": "email",
+      "prefix": "loadtest",
+      "domain": "example.org"
+    },
+    "request_id": {
+      "type": "uuid"
+    },
+    "pick_mock_user": {
+      "type": "choice",
+      "items": [
+        "urn:john",
+        "urn:jane",
+        "urn:mark"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "name": "health",
+      "method": "GET",
+      "path": "/health",
+      "expected_status": 200,
+      "save": {
+        "db_status": "json.components.database"
+      }
+    },
+    {
+      "name": "config",
+      "method": "GET",
+      "path": "/config",
+      "expected_status": 200,
+      "save": {
+        "socket_url": "json.socket_url"
+      }
+    },
+    {
+      "name": "users_me_after_mock",
+      "method": "GET",
+      "path": "/api/users/me",
+      "expected_status": [
+        200,
+        401
+      ]
+    }
+  ]
+}

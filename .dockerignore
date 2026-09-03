@@ -1,0 +1,10 @@
+.git
+.venv
+__pycache__
+*.pyc
+.DS_Store
+results
+secrets.enc.yaml
+*.local.json
+*.local.yaml
+*.local.yml

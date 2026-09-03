@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# macOS
+.DS_Store
+
+# Outputs
+results/*
+!results/.gitkeep
+
+# Secrets
+secrets.enc.yaml
+secrets.local.yaml
+secrets.local.yml
+secrets.local.json
+**/*.local.yaml
+**/*.local.yml
+**/*.local.json
+.env
+.env.*
