@@ -46,6 +46,17 @@ Then open:
 http://127.0.0.1:9011
 ```
 
+### Container image
+
+Each push to `main` builds the image and publishes it to GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/harrykodden/api-flow-tester:latest
+docker run --rm -p 9011:8080 ghcr.io/harrykodden/api-flow-tester:latest
+```
+
+Then open `http://127.0.0.1:9011`.
+
 Current web UI capabilities:
 - browse suites from `examples/` (open a suite, then a scenario)
 - edit and save suite/scenario files from the browser

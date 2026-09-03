@@ -3,17 +3,43 @@ name: Docker
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=
+            type=ref,event=tag
 
       - name: Build image
         uses: docker/build-push-action@v6
@@ -26,9 +52,9 @@ jobs:
 
       - name: Smoke test
         run: |
-          docker run -d --name api-flow-tester -p 9011:9011 api-flow-tester:ci
+          docker run -d --name api-flow-tester -p 8080:8080 api-flow-tester:ci
           for i in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:9011/api/health; then
+            if curl -sf http://127.0.0.1:8080/api/health; then
               echo
               docker stop api-flow-tester
               exit 0
@@ -38,3 +64,14 @@ jobs:
           docker logs api-flow-tester
           docker stop api-flow-tester || true
           exit 1
+
+      - name: Push image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
