@@ -1,0 +1,29 @@
+{
+  "name": "chain_posts",
+  "description": "Uses the same user_id, lists that user's posts, then fetches one post by the id saved from the list.",
+  "fail_fast": true,
+  "selected_environment": "public",
+  "steps": [
+    {
+      "name": "list_user_posts",
+      "method": "GET",
+      "path": "{{ env.posts_url }}?userId={{ env.user_id }}",
+      "stop_on_failure": true,
+      "expected_status": 200,
+      "save": {
+        "post_id": "json.0.id",
+        "post_title": "json.0.title"
+      }
+    },
+    {
+      "name": "get_saved_post",
+      "method": "GET",
+      "path": "{{ env.server }}/posts/{{ vars.post_id }}",
+      "stop_on_failure": true,
+      "expected_status": 200,
+      "expected_json_contains": {
+        "title": "{{ vars.post_title }}"
+      }
+    }
+  ]
+}

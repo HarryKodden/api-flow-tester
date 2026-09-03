@@ -1,84 +1,37 @@
-# OAuth2 Server Regression Scenarios
+# Example suites
 
-Translated copies of all `tests/test_*.sh` scripts into [loadtester](../../loadtester) scenario JSON
-(`../loadtester` relative to this repo).
-
-## Layout
+The published example is `demo/`: a two-scenario suite against [JSONPlaceholder](https://jsonplaceholder.typicode.com).
 
 | File | Purpose |
 |------|---------|
-| `test_*.json` | One scenario per shell test (37 files) |
-| `suite-local.json` | Local AS (no upstream) |
-| `suite-proxy.json` | Proxy AS + mock upstream |
-| `suite-proxy-dpop.json` | Proxy AS with DPoP required |
-| `suite-cimd.json` | Local AS with CIMD |
-| `suite-register.json` | Registers clients first, then runs local tests with collected `client_id` / `client_secret` |
-| `suite.json` | All 37 (not expected to pass on one server) |
-| `README.md` | This file |
+| `demo/suite.json` | Suite env: static `server`, derived `posts_url`, empty `user_id` |
+| `demo/lookup_user.json` | Manual `user_id`, save response fields, reuse them in the next step |
+| `demo/chain_posts.json` | List posts for that user, save a post id, fetch that post |
+
+## What it demonstrates
+
+- **Static environment values** — `server` is set in the suite file
+- **Derived environment values** — `posts_url` is `{{ server }}/posts`
+- **Manually provided values** — `user_id` is empty; fill it in **Missing environment values** (use `1`) before Run Tests
+- **API chaining** — `save` copies JSON fields into `vars.*`
+- **Passing vars between requests** — later steps use `{{ vars.looked_up_user_id }}`, `{{ vars.post_id }}`, and so on
+- **Suite export** — `lookup_user` exports `user_name` / `user_email` for later members
 
 ## How to run
 
-Start the OAuth2 server (and mock upstream for `proxy` / `tags: ["proxy"]` scenarios) yourself — these scenarios do **not** manage process lifecycle the way `scripts/run-test-script.sh` does.
+Open the web UI, select **demo**, enter `user_id` = `1`, then Run Tests.
 
-From the loadtester repo:
+Or from the CLI (after setting `user_id` in the suite env or via `--extra-env-file`):
 
 ```bash
-cd ../loadtester
+printf '%s\n' '{"user_id":"1"}' > /tmp/demo-env.json
 ./bin/test.sh \
-  --scenario-file ./examples/oauth2-server/test_introspection.json \
-  --scenario-environment local \
+  --scenario-file ./examples/demo/suite.json \
+  --scenario-extra-env /tmp/demo-env.json \
   --regression \
-  --label oauth2_introspection
+  --label demo
 ```
 
-Or open the web UI, pick a suite, then Run Tests.
+API hosts must be an IP or FQDN, not localhost.
 
-Useful filters from `suite.json`:
-
-- `translation_status: full` — runnable as-is against a stock local server
-- `partial` — HTTP core present; some shell assertions omitted or stubbed
-- `stub` — needs loadtester extensions or external fixtures (DPoP proofs, FINAL_URL, JWT mint, CIMD metadata server, Go/docker)
-
-## Environments
-
-Each scenario embeds:
-
-- `local` — AS on port 8080; set `server` to an IP or FQDN (not localhost)
-- `proxy` — proxy AS on port 8090 and mock upstream on 9999; set `server` and `mock_provider` to IPs or FQDNs
-
-Optional stubs in env (replace before expecting success):
-
-| Key | Used by |
-|-----|---------|
-| `dpop_proof` / `dpop_jkt` | DPoP scenarios |
-| `client_assertion` | Attestation / private_key_jwt scenarios |
-| `pkce_verifier` / `pkce_challenge` | Fixed RFC 7636 sample pair |
-
-## Translation fidelity
-
-Loadtester today supports: `method`, `path`, `headers`, `json`, `data`, `expected_status`, `expected_json_contains`, `save` (json/headers), random generators, environments.
-
-**Not supported** (hence stubs/partials):
-
-1. DPoP ES256 proof generation / nonce retry  
-2. Redirect follow + `FINAL_URL` / `code=` extraction  
-3. HTML scrape / form login / consent  
-4. PKCE generation (fixed pair provided)  
-5. JWT attestation builders  
-6. Poll/sleep loops (device grant)  
-7. Multi-host (AS + mock) in one scenario  
-8. Non-HTTP suites (`test_storage_consistency.sh`)
-
-## Suggested next runner extensions
-
-To promote most `partial`/`stub` scenarios to `full`:
-
-1. DPoP helper step (or `${dpop:...}` secret/tool)  
-2. `follow_redirects` + save final URL / query params  
-3. `expected_body_contains` for HTML/text  
-4. `poll` / `retry` step for device flow  
-5. JWT / attestation fixture helper  
-
-## Counts
-
-See `suite.json` → `summary` (regenerated with the scenarios).
+The `oauth2-server/` fixtures can stay on disk for local work; they are listed in `.gitignore` and are not part of the published repository.

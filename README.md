@@ -42,11 +42,9 @@ CLI runs use the same image:
 
 ```bash
 docker compose run --rm api-flow-tester ./bin/test.sh \
-  --host 192.168.1.10 \
-  --port 8080 \
-  --scenario-file ./examples/oauth2-server/suite-local.json \
+  --scenario-file ./examples/demo/suite.json \
   --regression \
-  --label oauth2_regression
+  --label demo
 ```
 
 ### Local Python
@@ -87,11 +85,9 @@ Run a suite (one pass, fail on errors):
 
 ```bash
 ./bin/test.sh \
-  --host 192.168.1.10 \
-  --port 8080 \
-  --scenario-file ./examples/oauth2-server/suite-proxy.json \
+  --scenario-file ./examples/demo/suite.json \
   --regression \
-  --label oauth2_regression
+  --label demo
 ```
 
 Run a single scenario the same way, pointing `--scenario-file` at a `test_*.json`.

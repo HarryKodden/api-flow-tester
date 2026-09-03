@@ -1,0 +1,46 @@
+{
+  "name": "demo",
+  "description": "Small public-API suite. Fill user_id (try 1) in Missing environment values. server and posts_url are already set; posts_url is expanded from server.",
+  "scenarios": [
+    "lookup_user.json",
+    "chain_posts.json"
+  ],
+  "steps": [],
+  "selected_environment": "public",
+  "environments": {
+    "public": {
+      "server": "https://jsonplaceholder.typicode.com",
+      "posts_url": "{{ server }}/posts",
+      "user_id": ""
+    }
+  },
+  "summary": {
+    "total": 2,
+    "full": 2,
+    "partial": 0,
+    "stub": 0
+  },
+  "manifest": [
+    {
+      "file": "lookup_user.json",
+      "translation_status": "full",
+      "tags": [
+        "demo",
+        "environment",
+        "chaining"
+      ],
+      "steps": 2,
+      "limitations": []
+    },
+    {
+      "file": "chain_posts.json",
+      "translation_status": "full",
+      "tags": [
+        "demo",
+        "chaining"
+      ],
+      "steps": 2,
+      "limitations": []
+    }
+  ]
+}

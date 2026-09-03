@@ -1,0 +1,36 @@
+{
+  "name": "lookup_user",
+  "description": "Static env (server) plus a manually provided user_id. Saves fields for later steps and for the next suite member.",
+  "fail_fast": true,
+  "selected_environment": "public",
+  "export_env": [
+    "user_name",
+    "user_email",
+    "looked_up_user_id"
+  ],
+  "steps": [
+    {
+      "name": "get_user",
+      "method": "GET",
+      "path": "{{ env.server }}/users/{{ env.user_id }}",
+      "stop_on_failure": true,
+      "expected_status": 200,
+      "save": {
+        "looked_up_user_id": "json.id",
+        "user_name": "json.name",
+        "user_email": "json.email",
+        "username": "json.username"
+      }
+    },
+    {
+      "name": "get_user_by_saved_id",
+      "method": "GET",
+      "path": "{{ env.server }}/users/{{ vars.looked_up_user_id }}",
+      "stop_on_failure": true,
+      "expected_status": 200,
+      "expected_json_contains": {
+        "email": "{{ vars.user_email }}"
+      }
+    }
+  ]
+}
