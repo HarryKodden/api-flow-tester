@@ -24,31 +24,6 @@ The CLI entrypoint is still `bin/test.sh`. The product is a regression tester, n
 
 ## Quick Start
 
-### Docker Compose
-
-```bash
-docker compose up --build
-```
-
-Then open:
-
-```text
-http://127.0.0.1:9011
-```
-
-To target a service, set the environment `server` (and `--host` if you pass one) to a reachable IP or FQDN. Do not use `localhost`, `127.0.0.1`, or `host.docker.internal`.
-
-CLI runs use the same image:
-
-```bash
-docker compose run --rm api-flow-tester ./bin/test.sh \
-  --scenario-file ./examples/demo/suite.json \
-  --regression \
-  --label demo
-```
-
-### Local Python
-
 ```bash
 cd api-flow-tester
 python3 -m venv .venv
