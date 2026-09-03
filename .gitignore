@@ -19,3 +19,6 @@ results/*
 
 # Local OAuth2 regression fixtures (not published)
 examples/oauth2-server/
+
+# docker-compose
+docker-compose.yml

@@ -23,6 +23,6 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app
 
-EXPOSE 9011
+EXPOSE 8080
 
-CMD ["uvicorn", "webapp.app:app", "--host", "0.0.0.0", "--port", "9011"]
+CMD ["uvicorn", "webapp.app:app", "--host", "0.0.0.0", "--port", "8080"]
