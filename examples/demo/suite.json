@@ -9,7 +9,6 @@
   "selected_environment": "public",
   "environments": {
     "public": {
-      "server": "https://jsonplaceholder.typicode.com",
       "posts_url": "{{ server }}/posts",
       "user_id": ""
     }
