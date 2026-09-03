@@ -44,6 +44,15 @@ jobs:
             type=sha,prefix=
             type=ref,event=tag
 
+      - name: Release label
+        id: release
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=dev" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build image
         uses: docker/build-push-action@v6
         with:
@@ -51,6 +60,8 @@ jobs:
           load: true
           platforms: linux/amd64
           tags: api-flow-tester:ci
+          build-args: |
+            RELEASE=${{ steps.release.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -78,5 +89,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            RELEASE=${{ steps.release.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

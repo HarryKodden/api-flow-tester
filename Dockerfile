@@ -1,5 +1,9 @@
 FROM python:3.12-slim
 
+# Image/release tag shown in the UI corner ribbon (CI: --build-arg RELEASE=vX.Y.Z).
+ARG RELEASE=dev
+ENV RELEASE=$RELEASE
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         apache2-utils \
         ca-certificates \

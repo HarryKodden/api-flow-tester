@@ -62,7 +62,9 @@ def _json(content: Any, status_code: int = 200) -> JSONResponse:
     return JSONResponse(content=content, status_code=status_code, headers=NO_STORE_HEADERS)
 
 
-app = FastAPI(title="Regression Tester", version="0.1.0")
+RELEASE = (os.environ.get("RELEASE") or "dev").strip() or "dev"
+
+app = FastAPI(title="Regression Tester", version=RELEASE)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -88,7 +90,7 @@ templates = Jinja2Templates(directory=str(ROOT / "webapp" / "templates"))
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "release": RELEASE}
 
 
 def _normalize_examples_rel(relative: str, *, allow_empty: bool = False) -> str:
@@ -1106,7 +1108,7 @@ def index(request: Request) -> Any:
     response = templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"asset_version": asset_version},
+        context={"asset_version": asset_version, "release": RELEASE},
     )
     response.headers.update(NO_STORE_HEADERS)
     return response
