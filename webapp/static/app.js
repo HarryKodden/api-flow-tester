@@ -1,15 +1,16 @@
 const scenarioList = document.getElementById('scenario-list');
-const runList = document.getElementById('run-list');
 const scenarioEditor = document.getElementById('scenario-editor');
 const scenarioNameInput = document.getElementById('scenario-name');
 const editorKind = document.getElementById('editor-kind');
 const editorTitle = document.getElementById('editor-title');
 const editorCrumb = document.getElementById('editor-crumb');
 const suitePanel = document.getElementById('suite-panel');
+const suiteSection = document.getElementById('suite-section');
+const scenarioSection = document.getElementById('scenario-section');
+const saveSuiteButton = document.getElementById('save-suite');
 const suiteMemberCount = document.getElementById('suite-member-count');
 const suiteDescription = document.getElementById('suite-description');
 const suiteMembers = document.getElementById('suite-members');
-const scenarioMeta = document.getElementById('scenario-meta');
 const scenarioBuilder = document.getElementById('scenario-builder');
 const addStepButton = document.getElementById('add-step');
 const saveScenarioButton = document.getElementById('save-scenario');
@@ -18,9 +19,7 @@ const importScenarioButton = document.getElementById('import-scenario');
 const importScenarioFileInput = document.getElementById('import-scenario-file');
 const scenarioBaseUrl = document.getElementById('scenario-base-url');
 const scenarioEnvironmentSelect = document.getElementById('scenario-environment');
-const randomGeneratorsSummary = document.getElementById('random-generators-summary');
 const editRandomGeneratorsJsonButton = document.getElementById('edit-random-generators-json');
-const scenarioEnvironmentsSummary = document.getElementById('scenario-environments-summary');
 const editEnvironmentsJsonButton = document.getElementById('edit-environments-json');
 const jsonDialog = document.getElementById('json-dialog');
 const jsonDialogTitle = document.getElementById('json-dialog-title');
@@ -40,10 +39,6 @@ const stepPathResolved = document.getElementById('step-path-resolved');
 const stepTimeoutInput = document.getElementById('step-timeout');
 const stepExpectedStatusInput = document.getElementById('step-expected-status');
 const stepSaveResponseAsInput = document.getElementById('step-save-response-as');
-const stepHeadersSummary = document.getElementById('step-headers-summary');
-const stepJsonSummary = document.getElementById('step-json-summary');
-const stepSaveSummary = document.getElementById('step-save-summary');
-const stepExpectedJsonSummary = document.getElementById('step-expected-json-summary');
 const editStepHeadersJsonButton = document.getElementById('edit-step-headers-json');
 const editStepJsonButton = document.getElementById('edit-step-json');
 const editStepSaveJsonButton = document.getElementById('edit-step-save-json');
@@ -58,42 +53,28 @@ const sequenceTestOutput = document.getElementById('sequence-test-output');
 const stepCurlOutput = document.getElementById('step-curl');
 const copyStepCurlButton = document.getElementById('copy-step-curl');
 const regressionRunButton = document.getElementById('regression-run');
-const runHostInput = document.getElementById('run-host');
-const runPortInput = document.getElementById('run-port');
-const runHostWrap = document.getElementById('run-host-wrap');
-const runPortWrap = document.getElementById('run-port-wrap');
 const scenarioBaseUrlWrap = document.getElementById('scenario-base-url-wrap');
 const runTargetHint = document.getElementById('run-target-hint');
-const RUN_HOST_STORAGE_KEY = 'lti.run.host';
-const RUN_PORT_STORAGE_KEY = 'lti.run.port';
-const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
-let dockerRewriteHost = '';
-let defaultTargetHost = '';
-let defaultTargetPort = '';
+const THEME_STORAGE_KEY = 'lti.theme';
+const THEME_DEFAULT = 'dark';
+const ENV_OVERRIDE_STORAGE_KEY = 'lti.env.overrides';
+const ENV_REMOVED_STORAGE_KEY = 'lti.env.removed';
 const runSpinner = document.getElementById('run-spinner');
 const runProgressWrap = document.getElementById('run-progress-wrap');
 const runProgressBar = document.getElementById('run-progress-bar');
 const runProgressTrack = document.getElementById('run-progress-bar-track');
 const runProgressLabel = document.getElementById('run-progress-label');
 const runProgressTime = document.getElementById('run-progress-time');
-const reportProgressWrap = document.getElementById('report-progress-wrap');
-const reportProgressBar = document.getElementById('report-progress-bar');
-const reportProgressTrack = document.getElementById('report-progress-bar-track');
-const reportProgressLabel = document.getElementById('report-progress-label');
-const reportProgressTime = document.getElementById('report-progress-time');
-const deleteRunButton = document.getElementById('delete-run');
-const clearRunsButton = document.getElementById('clear-runs');
 const stepTestOutput = document.getElementById('step-test-output');
 const runOutput = document.getElementById('run-output');
 const reportText = document.getElementById('report-text');
 const reportSummary = document.getElementById('report-summary');
-const artifactGallery = document.getElementById('artifact-gallery');
-let selectedRunId = null;
 let selectedScenarioName = null;
 let selectedFolderPath = '';
 let activeSuitePath = '';
 let activeSuiteMembers = [];
 let activeSuiteDocument = null;
+const LAST_OPEN_STORAGE_KEY = 'lti.last.open';
 let scenarioTree = {type: 'dir', name: 'examples', path: '', children: []};
 let expandedFolders = new Set();
 let expandedSuites = new Set();
@@ -109,9 +90,16 @@ let lastHydratedCurlKey = '';
 let lastCopiedCurl = '';
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    headers: {'Content-Type': 'application/json'},
-    ...options,
+  const {headers: extraHeaders, cache: _ignoredCache, ...rest} = options;
+  const method = String(rest.method || 'GET').toUpperCase();
+  let url = path;
+  if (method === 'GET') {
+    url += `${path.includes('?') ? '&' : '?'}_=${Date.now()}`;
+  }
+  const response = await fetch(url, {
+    cache: 'no-store',
+    headers: {'Content-Type': 'application/json', ...extraHeaders},
+    ...rest,
   });
   if (!response.ok) {
     const body = await response.text();
@@ -344,20 +332,9 @@ function renderTreeNodes(container, nodes, depth) {
   });
 }
 
-function renderList(container, items, onClick, format) {
-  container.innerHTML = '';
-  items.forEach((item) => {
-    const button = document.createElement('button');
-    button.className = 'list-item';
-    button.textContent = format(item);
-    button.addEventListener('click', () => onClick(item));
-    container.appendChild(button);
-  });
-}
-
 function createEmptyScenario() {
   return {
-    base_url: 'http://localhost:8080',
+    base_url: '',
     environments: {},
     selected_environment: '',
     random_generators: {},
@@ -458,14 +435,537 @@ function getSelectedEnvironmentName() {
   return names[0] || '';
 }
 
-function remapDisplayedServer(env) {
-  const values = {...env};
-  const raw = values.server || values.base_url || values.baseUrl || values.url;
-  const parsed = parseRunUrl(raw || '');
-  if (parsed && LOOPBACK_HOSTS.has(parsed.host) && defaultTargetHost) {
-    values.server = `${parsed.scheme}://${defaultTargetHost}:${parsed.port}`;
+const CONNECTION_ENV_KEYS = new Set(['server', 'base_url', 'baseUrl', 'url', 'mock_provider']);
+const FORBIDDEN_API_HOSTS = new Set([
+  'localhost',
+  '127.0.0.1',
+  '::1',
+  '0.0.0.0',
+  'host.docker.internal',
+  'ip6-localhost',
+  'ip6-loopback',
+]);
+const ROUTABLE_HOST_HELP = 'API hosts must be an IP or FQDN, not localhost';
+
+function hostnameFromTarget(value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return '';
   }
-  return values;
+  const parsed = parseRunUrl(text.includes('://') ? text : `http://${text}`);
+  return (parsed?.host || '').toLowerCase();
+}
+
+function isForbiddenApiHost(host) {
+  const name = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (!name) {
+    return false;
+  }
+  if (FORBIDDEN_API_HOSTS.has(name)) {
+    return true;
+  }
+  return name.endsWith('.localhost');
+}
+
+function isForbiddenApiTarget(value) {
+  if (typeof value !== 'string') {
+    return false;
+  }
+  const text = value.trim();
+  if (!text || text.includes('{{')) {
+    return false;
+  }
+  return isForbiddenApiHost(hostnameFromTarget(text));
+}
+
+function envPlaceholderPath(token) {
+  const trimmed = String(token || '').trim();
+  if (trimmed.startsWith('vars.') || trimmed.startsWith('random.') || trimmed.startsWith('meta.')) {
+    return null;
+  }
+  if (trimmed.startsWith('env.')) {
+    return trimmed.slice(4);
+  }
+  if (trimmed.startsWith('_.')) {
+    return trimmed.slice(2);
+  }
+  return trimmed;
+}
+
+function valueHasEnvPlaceholders(value) {
+  const matches = String(value).match(/\{\{\s*([^}]+)\s*\}\}/g) || [];
+  return matches.some((match) => {
+    const inner = match.replace(/^\{\{\s*|\s*\}\}$/g, '');
+    return envPlaceholderPath(inner) != null;
+  });
+}
+
+function expandEnvironmentValues(env, keys) {
+  if (!env || typeof env !== 'object' || Array.isArray(env)) {
+    return {};
+  }
+  let current = {...env};
+
+  const expandString = (value) => value.replace(/\{\{\s*([^}]+)\s*\}\}/g, (match, rawToken) => {
+    const path = envPlaceholderPath(rawToken);
+    if (path == null) {
+      return match;
+    }
+    let resolved = lookupEnvPath(current, path);
+    if (resolved == null && Object.prototype.hasOwnProperty.call(current, path)) {
+      resolved = current[path];
+    }
+    if (resolved == null || resolved === '' || typeof resolved === 'object') {
+      return match;
+    }
+    const text = String(resolved);
+    if (valueHasEnvPlaceholders(text)) {
+      return match;
+    }
+    return text;
+  });
+
+  const walk = (value) => {
+    if (typeof value === 'string') {
+      return expandString(value);
+    }
+    if (Array.isArray(value)) {
+      return value.map(walk);
+    }
+    if (value && typeof value === 'object') {
+      const next = {};
+      Object.entries(value).forEach(([key, item]) => {
+        next[key] = walk(item);
+      });
+      return next;
+    }
+    return value;
+  };
+
+  for (let i = 0; i < 10; i += 1) {
+    let next;
+    if (keys && keys.size) {
+      next = {...current};
+      keys.forEach((key) => {
+        if (Object.prototype.hasOwnProperty.call(next, key)) {
+          next[key] = walk(next[key]);
+        }
+      });
+    } else {
+      next = walk(current);
+    }
+    if (JSON.stringify(next) === JSON.stringify(current)) {
+      break;
+    }
+    current = next;
+  }
+  return current;
+}
+
+function isConcreteEnvValue(value) {
+  if (value == null) {
+    return false;
+  }
+  if (typeof value === 'string') {
+    const text = value.trim();
+    return Boolean(text) && !valueHasEnvPlaceholders(text);
+  }
+  if (typeof value === 'object') {
+    return Array.isArray(value) ? value.length > 0 : Object.keys(value).length > 0;
+  }
+  return true;
+}
+
+function collectEnvRefs(value, found = new Set()) {
+  if (typeof value === 'string') {
+    const pattern = /\{\{\s*([^}]+)\s*\}\}/g;
+    let match = pattern.exec(value);
+    while (match) {
+      const path = envPlaceholderPath(match[1]);
+      if (path) {
+        found.add(path);
+      }
+      match = pattern.exec(value);
+    }
+  } else if (Array.isArray(value)) {
+    value.forEach((item) => collectEnvRefs(item, found));
+  } else if (value && typeof value === 'object') {
+    Object.values(value).forEach((item) => collectEnvRefs(item, found));
+  }
+  return found;
+}
+
+function getRawMergedEnvironment() {
+  const selectedName = getSelectedEnvironmentName();
+  if (!selectedName) {
+    return {};
+  }
+  const higher = getSuiteEnvironments()[selectedName];
+  const lower = getChildEnvironments()[selectedName];
+  return mergeDefined(
+    higher && typeof higher === 'object' ? higher : {},
+    lower && typeof lower === 'object' ? lower : {},
+  );
+}
+
+function setEnvPath(target, path, value) {
+  const parts = String(path).split('.');
+  let cursor = target;
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const part = parts[i];
+    if (!cursor[part] || typeof cursor[part] !== 'object' || Array.isArray(cursor[part])) {
+      cursor[part] = {};
+    }
+    cursor = cursor[part];
+  }
+  cursor[parts[parts.length - 1]] = value;
+}
+
+function loadAllSessionEnvOverrides() {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(ENV_OVERRIDE_STORAGE_KEY) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function getSessionEnvOverrides() {
+  const all = loadAllSessionEnvOverrides();
+  const scoped = all[getSelectedEnvironmentName() || '_'];
+  return scoped && typeof scoped === 'object' && !Array.isArray(scoped) ? {...scoped} : {};
+}
+
+function saveSessionEnvOverrides(values) {
+  const all = loadAllSessionEnvOverrides();
+  const key = getSelectedEnvironmentName() || '_';
+  const next = {};
+  Object.entries(values || {}).forEach(([name, value]) => {
+    if (String(value || '').trim()) {
+      next[name] = String(value);
+    }
+  });
+  if (Object.keys(next).length) {
+    all[key] = next;
+  } else {
+    delete all[key];
+  }
+  try {
+    sessionStorage.setItem(ENV_OVERRIDE_STORAGE_KEY, JSON.stringify(all));
+  } catch {
+    // Ignore storage failures; values still apply for this page lifetime via the form.
+  }
+}
+
+function setSessionEnvOverride(name, value) {
+  const current = getSessionEnvOverrides();
+  if (String(value || '').trim()) {
+    current[name] = String(value);
+  } else {
+    delete current[name];
+  }
+  saveSessionEnvOverrides(current);
+}
+
+function clearSessionEnvOverrides() {
+  saveSessionEnvOverrides({});
+}
+
+function applySessionEnvOverrides(env) {
+  const next = {...(env || {})};
+  Object.entries(getSessionEnvOverrides()).forEach(([key, value]) => {
+    if (!isConcreteEnvValue(value)) {
+      return;
+    }
+    if (key.includes('.')) {
+      const current = lookupEnvPath(next, key);
+      if (!isConcreteEnvValue(current) || isForbiddenApiTarget(current)) {
+        setEnvPath(next, key, value);
+      }
+      return;
+    }
+    const current = next[key];
+    if (!isConcreteEnvValue(current) || (CONNECTION_ENV_KEYS.has(key) && isForbiddenApiTarget(current))) {
+      next[key] = value;
+    }
+  });
+  return next;
+}
+
+function isAssignedEnvValue(value) {
+  if (value == null) {
+    return false;
+  }
+  if (typeof value === 'string') {
+    return Boolean(value.trim());
+  }
+  if (typeof value === 'object') {
+    return Array.isArray(value) ? value.length > 0 : Object.keys(value).length > 0;
+  }
+  return true;
+}
+
+function selectedEnvironmentBlock() {
+  const name = getSelectedEnvironmentName();
+  if (!name) {
+    return {};
+  }
+  const suiteBlock = getSuiteEnvironments()[name];
+  if (suiteBlock && typeof suiteBlock === 'object' && !Array.isArray(suiteBlock)) {
+    return suiteBlock;
+  }
+  const childBlock = getChildEnvironments()[name];
+  return childBlock && typeof childBlock === 'object' && !Array.isArray(childBlock) ? childBlock : {};
+}
+
+function environmentBlock(environments, name) {
+  const block = environments && name ? environments[name] : null;
+  return block && typeof block === 'object' && !Array.isArray(block) ? block : {};
+}
+
+function shouldPromptForEnvKey(key) {
+  const name = String(key || '').trim();
+  if (!name || name.endsWith('_encoded')) {
+    return false;
+  }
+  return true;
+}
+
+function removedEnvStorageScope() {
+  return `${activeSuitePath || selectedScenarioName || '_'}::${getSelectedEnvironmentName() || '_'}`;
+}
+
+function loadRemovedEnvKeys() {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(ENV_REMOVED_STORAGE_KEY) || '{}');
+    const list = parsed && typeof parsed === 'object' ? parsed[removedEnvStorageScope()] : null;
+    return Array.isArray(list)
+      ? list.filter((key) => typeof key === 'string' && shouldPromptForEnvKey(key))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRemovedEnvKeys(keys) {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(ENV_REMOVED_STORAGE_KEY) || '{}');
+    const all = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    const unique = [...new Set((keys || []).filter((key) => shouldPromptForEnvKey(key)))];
+    if (unique.length) {
+      all[removedEnvStorageScope()] = unique;
+    } else {
+      delete all[removedEnvStorageScope()];
+    }
+    sessionStorage.setItem(ENV_REMOVED_STORAGE_KEY, JSON.stringify(all));
+  } catch {
+    // Ignore storage failures; removed keys still apply for this page lifetime.
+  }
+}
+
+function syncRemovedEnvKeys(previousEnvironments, nextEnvironments) {
+  const name = getSelectedEnvironmentName();
+  const previous = environmentBlock(previousEnvironments, name);
+  const next = environmentBlock(nextEnvironments, name);
+  const removed = new Set(loadRemovedEnvKeys());
+  Object.keys(previous).forEach((key) => {
+    if (!Object.prototype.hasOwnProperty.call(next, key)) {
+      removed.add(key);
+    }
+  });
+  Object.keys(next).forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(next, key)) {
+      removed.delete(key);
+    }
+  });
+  saveRemovedEnvKeys([...removed]);
+}
+
+function unsetEnvironmentKeys(applySession) {
+  const fileBlock = selectedEnvironmentBlock();
+  let env = getRawMergedEnvironment();
+  if (applySession) {
+    env = applyEncodedCompanions(expandEnvironmentValues(applySessionEnvOverrides(env)));
+  }
+  const keys = new Set([...Object.keys(fileBlock), ...loadRemovedEnvKeys()]);
+  return [...keys].filter((key) => {
+    if (!shouldPromptForEnvKey(key)) {
+      return false;
+    }
+    if (Object.prototype.hasOwnProperty.call(fileBlock, key) && !isAssignedEnvValue(fileBlock[key])) {
+      return applySession ? !isConcreteEnvValue(env[key]) : true;
+    }
+    if (!Object.prototype.hasOwnProperty.call(fileBlock, key)) {
+      return applySession ? !isConcreteEnvValue(env[key]) : true;
+    }
+    return false;
+  }).sort();
+}
+
+function missingEnvDependencies(applySession) {
+  let env = getRawMergedEnvironment();
+  if (applySession) {
+    env = applyEncodedCompanions(expandEnvironmentValues(applySessionEnvOverrides(env)));
+  }
+  const refs = collectEnvRefs(env);
+  collectEnvRefs(currentScenario?.steps || [], refs);
+  const present = applySession ? isConcreteEnvValue : isAssignedEnvValue;
+  return [...refs].filter((path) => {
+    let resolved = lookupEnvPath(env, path);
+    if (resolved == null && Object.prototype.hasOwnProperty.call(env, path)) {
+      resolved = env[path];
+    }
+    if (CONNECTION_ENV_KEYS.has(path)) {
+      return !isConcreteEnvValue(resolved) || isForbiddenApiTarget(resolved);
+    }
+    return !present(resolved);
+  }).sort();
+}
+
+function connectionKeysNeedingValues(env) {
+  const refs = collectEnvRefs(env);
+  collectEnvRefs(currentScenario?.steps || [], refs);
+  const scenarioBase = (currentScenario?.base_url || '').trim();
+  return [...CONNECTION_ENV_KEYS].filter((key) => {
+    const exists = Object.prototype.hasOwnProperty.call(env, key);
+    const referenced = refs.has(key);
+    const fromScenarioBase = key === 'base_url' && Boolean(scenarioBase);
+    if (!exists && !referenced && !fromScenarioBase) {
+      return false;
+    }
+    const value = exists
+      ? env[key]
+      : (fromScenarioBase ? scenarioBase : undefined);
+    if (!isAssignedEnvValue(value)) {
+      return true;
+    }
+    if (typeof value === 'string' && valueHasEnvPlaceholders(value)) {
+      return true;
+    }
+    return isForbiddenApiTarget(value);
+  });
+}
+
+function loopbackConnectionKeys(applySession) {
+  let env = getRawMergedEnvironment();
+  if (applySession) {
+    env = applyEncodedCompanions(expandEnvironmentValues(applySessionEnvOverrides(env)));
+  }
+  return connectionKeysNeedingValues(env);
+}
+
+function requiredEnvironmentNames() {
+  return [...new Set([
+    ...missingEnvDependencies(false),
+    ...loopbackConnectionKeys(false),
+    ...unsetEnvironmentKeys(false),
+  ])].sort();
+}
+
+function unsatisfiedEnvironmentNames() {
+  return [...new Set([
+    ...missingEnvDependencies(true),
+    ...loopbackConnectionKeys(true),
+    ...unsetEnvironmentKeys(true),
+  ])].sort();
+}
+
+function environmentOverridesPayload() {
+  const overrides = {};
+  Object.entries(getSessionEnvOverrides()).forEach(([key, value]) => {
+    if (String(value || '').trim()) {
+      overrides[key] = String(value).trim();
+    }
+  });
+  return overrides;
+}
+
+let lastRequiredEnvNames = '';
+let runInProgress = false;
+
+function renderRequiredEnvPanel() {
+  const wrap = document.getElementById('session-env-wrap');
+  const fields = document.getElementById('session-env-fields');
+  const hint = document.getElementById('session-env-run-hint');
+  const empty = document.getElementById('session-env-empty');
+  if (!wrap || !fields) {
+    return;
+  }
+  if (!hasSuiteContext()) {
+    wrap.classList.add('hidden');
+    fields.replaceChildren();
+    lastRequiredEnvNames = '';
+    return;
+  }
+  const names = requiredEnvironmentNames();
+  const unsatisfied = unsatisfiedEnvironmentNames();
+  const session = getSessionEnvOverrides();
+  wrap.classList.remove('hidden');
+  wrap.classList.toggle('is-unsatisfied', unsatisfied.length > 0);
+  if (hint) {
+    hint.classList.toggle('hidden', unsatisfied.length === 0);
+  }
+  if (empty) {
+    empty.classList.toggle('hidden', names.length > 0);
+  }
+  const signature = names.join('\0');
+  if (signature === lastRequiredEnvNames && fields.childElementCount === names.length) {
+    names.forEach((name) => {
+      const input = fields.querySelector(`[data-env-name="${name.replace(/"/g, '')}"]`);
+      if (input && document.activeElement !== input) {
+        input.value = session[name] || '';
+      }
+    });
+    return;
+  }
+  lastRequiredEnvNames = signature;
+  fields.replaceChildren();
+  names.forEach((name) => {
+    const label = document.createElement('label');
+    label.append(document.createTextNode(name));
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.dataset.envName = name;
+    input.value = session[name] || '';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.placeholder = CONNECTION_ENV_KEYS.has(name)
+      ? 'http://192.168.1.10:8080'
+      : `Value for ${name}`;
+    input.addEventListener('input', () => {
+      setSessionEnvOverride(name, input.value);
+      updateRunAvailability();
+      lastHydratedCurlKey = '';
+      scheduleStepCurlPreview();
+    });
+    label.appendChild(input);
+    const fileValue = getRawMergedEnvironment()[name] ?? (name === 'base_url' ? currentScenario?.base_url : undefined);
+    if (typeof fileValue === 'string' && fileValue.trim() && !session[name]) {
+      const current = document.createElement('span');
+      current.className = 'muted env-current-value';
+      current.textContent = `Currently ${fileValue}`;
+      label.appendChild(current);
+    }
+    fields.appendChild(label);
+  });
+}
+
+function updateRunAvailability() {
+  renderRequiredEnvPanel();
+  const unsatisfied = unsatisfiedEnvironmentNames();
+  const target = getRunTarget();
+  const hostBlocked = Boolean(target.host) && isForbiddenApiHost(target.host);
+  const blocked = runInProgress || unsatisfied.length > 0 || hostBlocked;
+  if (regressionRunButton) {
+    regressionRunButton.disabled = blocked;
+    if (unsatisfied.length) {
+      regressionRunButton.title = `Set required values: ${unsatisfied.join(', ')}`;
+    } else if (hostBlocked) {
+      regressionRunButton.title = ROUTABLE_HOST_HELP;
+    } else {
+      regressionRunButton.title = 'Run Tests';
+    }
+  }
 }
 
 function getSelectedEnvironmentValues() {
@@ -473,12 +973,36 @@ function getSelectedEnvironmentValues() {
   if (!selectedName) {
     return {};
   }
-  const higher = getSuiteEnvironments()[selectedName];
-  const lower = getChildEnvironments()[selectedName];
-  return remapDisplayedServer(mergeDefined(
-    higher && typeof higher === 'object' ? higher : {},
-    lower && typeof lower === 'object' ? lower : {},
-  ));
+  let merged = applySessionEnvOverrides(getRawMergedEnvironment());
+  merged = expandEnvironmentValues(merged, CONNECTION_ENV_KEYS);
+  const resolvedHost = merged.server || merged.base_url || merged.baseUrl || merged.url
+    || (currentScenario?.base_url || '').trim();
+  if (resolvedHost) {
+    merged.server = merged.server || resolvedHost;
+    if (!merged.base_url) {
+      merged.base_url = resolvedHost;
+    }
+  }
+  return applyEncodedCompanions(expandEnvironmentValues(merged));
+}
+
+function applyEncodedCompanions(env) {
+  const next = {...env};
+  Object.keys(next).forEach((key) => {
+    if (key.endsWith('_encoded')) {
+      return;
+    }
+    const encodedKey = `${key}_encoded`;
+    if (!Object.prototype.hasOwnProperty.call(next, encodedKey)) {
+      return;
+    }
+    const value = next[key];
+    if (typeof value !== 'string' || !value.trim() || valueHasEnvPlaceholders(value)) {
+      return;
+    }
+    next[encodedKey] = encodeURIComponent(value);
+  });
+  return next;
 }
 
 function environmentValuesForDisplay() {
@@ -568,48 +1092,11 @@ function viewingSuite() {
 
 function getRunTarget() {
   const fromScenario = parseRunUrl(getResolvedBaseUrl() || '');
-  const suiteMode = viewingSuite();
-  const typedHost = suiteMode ? '' : (runHostInput?.value || '').trim();
-  const scenarioHost = fromScenario?.host || '';
-  let host = typedHost || scenarioHost || defaultTargetHost || 'localhost';
-  if (!typedHost && LOOPBACK_HOSTS.has(host) && defaultTargetHost) {
-    host = defaultTargetHost;
-  }
-  const portValue = suiteMode ? '' : (runPortInput?.value || '').trim();
-  const port = portValue
-    ? Number(portValue)
-    : (fromScenario?.port || (defaultTargetPort ? Number(defaultTargetPort) : 8080));
-  const scheme = fromScenario?.scheme || 'http';
-  return {scheme, host, port};
-}
-
-function persistRunTarget() {
-  if (!runHostInput || !runPortInput) {
-    return;
-  }
-  const host = runHostInput.value.trim();
-  const port = runPortInput.value.trim();
-  if (host) {
-    localStorage.setItem(RUN_HOST_STORAGE_KEY, host);
-  }
-  if (port) {
-    localStorage.setItem(RUN_PORT_STORAGE_KEY, port);
-  }
-}
-
-function restoreRunTarget() {
-  if (!runHostInput || !runPortInput) {
-    return;
-  }
-  const host = localStorage.getItem(RUN_HOST_STORAGE_KEY);
-  const port = localStorage.getItem(RUN_PORT_STORAGE_KEY);
-  if (host && !runHostInput.value.trim()) {
-    runHostInput.value = host;
-  }
-  if (port && !runPortInput.value.trim()) {
-    runPortInput.value = port;
-  }
-  updateRunTargetHint();
+  return {
+    scheme: fromScenario?.scheme || 'http',
+    host: fromScenario?.host || '',
+    port: fromScenario?.port || 8080,
+  };
 }
 
 function updateRunTargetHint() {
@@ -617,6 +1104,14 @@ function updateRunTargetHint() {
     return;
   }
   const target = getRunTarget();
+  if (!target.host) {
+    runTargetHint.textContent = 'Set server to an IP or FQDN (not localhost).';
+    return;
+  }
+  if (isForbiddenApiHost(target.host)) {
+    runTargetHint.textContent = ROUTABLE_HOST_HELP;
+    return;
+  }
   const url = `${target.scheme}://${target.host}:${target.port}`;
   if (viewingSuite()) {
     const envName = getSelectedEnvironmentName();
@@ -627,29 +1122,7 @@ function updateRunTargetHint() {
     runTargetHint.textContent = `Using “${envName}” from the suite editor → ${url}`;
     return;
   }
-  const loopback = LOOPBACK_HOSTS.has(target.host);
-  if (dockerRewriteHost && loopback) {
-    runTargetHint.textContent = `Docker would send localhost to ${dockerRewriteHost} (this Mac). Set Host to the VM, or leave it empty to use ${defaultTargetHost || 'LTI_TARGET_HOST'}.`;
-    return;
-  }
-  runTargetHint.textContent = `Requests go to ${url} (same as CLI --host / --port).`;
-}
-
-async function loadRuntimeInfo() {
-  try {
-    const health = await api('/api/health');
-    dockerRewriteHost = (health.rewrite_localhost || '').trim();
-    defaultTargetHost = (health.target_host || '').trim();
-    defaultTargetPort = (health.target_port || '').trim();
-  } catch {
-    dockerRewriteHost = '';
-    defaultTargetHost = '';
-    defaultTargetPort = '';
-  }
-  if (runHostInput && !runHostInput.value.trim() && defaultTargetHost) {
-    runHostInput.placeholder = defaultTargetHost;
-  }
-  updateRunTargetHint();
+  runTargetHint.textContent = `Requests go to ${url}.`;
 }
 
 function renderScenarioEnvironmentSelector() {
@@ -677,16 +1150,9 @@ function renderScenarioEnvironmentSelector() {
 }
 
 function syncSuiteRunFields() {
-  const suiteMode = viewingSuite();
   const hasEnvironments = Object.keys(getScenarioEnvironments()).length > 0;
-  if (runHostWrap) {
-    runHostWrap.classList.toggle('hidden', suiteMode);
-  }
-  if (runPortWrap) {
-    runPortWrap.classList.toggle('hidden', suiteMode);
-  }
   if (scenarioBaseUrlWrap) {
-    scenarioBaseUrlWrap.classList.toggle('hidden', suiteMode || hasEnvironments);
+    scenarioBaseUrlWrap.classList.toggle('hidden', hasEnvironments);
   }
 }
 
@@ -751,32 +1217,36 @@ function getValidatedScenarioPayload() {
   return payload;
 }
 
-function summarizeJsonObject(value, typeLabel) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return `${typeLabel}: 0 entries`;
+function jsonValueIsSet(value) {
+  if (value === undefined || value === null) {
+    return false;
   }
-  const keys = Object.keys(value);
-  if (keys.length === 0) {
-    return `${typeLabel}: 0 entries`;
-  }
-  return `${typeLabel}: ${keys.length} entr${keys.length === 1 ? 'y' : 'ies'} (${keys.slice(0, 3).join(', ')}${keys.length > 3 ? ', ...' : ''})`;
-}
-
-function summarizeJsonValue(value, typeLabel) {
-  if (value === undefined) {
-    return `${typeLabel}: empty`;
-  }
-  if (value === null) {
-    return `${typeLabel}: null`;
+  if (typeof value === 'string') {
+    return value.trim() !== '';
   }
   if (Array.isArray(value)) {
-    return `${typeLabel}: array (${value.length})`;
+    return value.length > 0;
   }
   if (typeof value === 'object') {
-    const keys = Object.keys(value);
-    return `${typeLabel}: object (${keys.length} key${keys.length === 1 ? '' : 's'})`;
+    return Object.keys(value).length > 0;
   }
-  return `${typeLabel}: ${typeof value}`;
+  return true;
+}
+
+function syncJsonFieldButton(button, value) {
+  if (!button) {
+    return;
+  }
+  const set = jsonValueIsSet(value);
+  const label = button.dataset.label || 'JSON';
+  button.classList.toggle('is-set', set);
+  button.dataset.set = set ? 'true' : 'false';
+  button.setAttribute('aria-label', set ? `Edit ${label}, values set` : `Edit ${label}`);
+  button.title = set ? `${label} — values set` : `Edit ${label}`;
+  const flag = button.querySelector('.json-field-flag');
+  if (flag) {
+    flag.hidden = !set;
+  }
 }
 
 function formatExpectedStatus(value) {
@@ -927,10 +1397,10 @@ function renderStepDetail() {
   stepTimeoutInput.value = step.timeout ?? '';
   stepExpectedStatusInput.value = formatExpectedStatus(step.expected_status);
   stepSaveResponseAsInput.value = step.save_response_as || '';
-  stepHeadersSummary.value = summarizeJsonObject(step.headers || {}, 'Headers');
-  stepJsonSummary.value = summarizeJsonValue(step.json, 'Request body');
-  stepSaveSummary.value = summarizeJsonObject(step.save || {}, 'Save mapping');
-  stepExpectedJsonSummary.value = summarizeJsonValue(step.expected_json_contains, 'Expected JSON');
+  syncJsonFieldButton(editStepHeadersJsonButton, step.headers);
+  syncJsonFieldButton(editStepJsonButton, step.json);
+  syncJsonFieldButton(editStepSaveJsonButton, step.save);
+  syncJsonFieldButton(editStepExpectedJsonButton, step.expected_json_contains);
   stepStopOnFailureInput.checked = Boolean(step.stop_on_failure);
   scheduleStepCurlPreview();
 }
@@ -940,8 +1410,6 @@ function renderScenarioBuilder() {
     currentScenario = createEmptyScenario();
   }
   scenarioBaseUrl.value = currentScenario.base_url || '';
-  randomGeneratorsSummary.value = summarizeJsonObject(currentScenario.random_generators || {}, 'Constants');
-  scenarioEnvironmentsSummary.value = summarizeJsonObject(currentScenario.environments || {}, 'Environments');
   renderScenarioEnvironmentSelector();
   renderHierarchy();
   renderStepSequence();
@@ -951,26 +1419,48 @@ function renderScenarioBuilder() {
 
 function getJsonDialogConfig(target) {
   if (target === 'environments') {
+    const editingSuiteEnv = Boolean(isSuiteScenario(currentScenario) || (activeSuiteDocument && Object.keys(getSuiteEnvironments()).length > 0));
     return {
-      title: 'Edit Environments JSON',
+      title: editingSuiteEnv ? 'Edit Suite Environments JSON' : 'Edit Environments JSON',
       fieldName: 'Environments',
-      currentValue: () => currentScenario?.environments || {},
+      currentValue: () => getScenarioEnvironments(),
       apply: (parsed) => {
-        currentScenario.environments = parsed || {};
-        const names = Object.keys(currentScenario.environments || {});
+        const previous = getScenarioEnvironments();
+        const next = parsed || {};
+        syncRemovedEnvKeys(previous, next);
+        if (isSuiteScenario(currentScenario) || !activeSuiteDocument) {
+          currentScenario.environments = next;
+        } else {
+          activeSuiteDocument.environments = next;
+        }
+        const names = Object.keys(next);
         if (!names.includes(currentScenario.selected_environment || '')) {
           currentScenario.selected_environment = names[0] || '';
+        }
+        if (activeSuiteDocument && names.includes(currentScenario.selected_environment || '')) {
+          activeSuiteDocument.selected_environment = currentScenario.selected_environment;
         }
       },
     };
   }
   if (target === 'random_generators') {
+    const editingSuite = Boolean(isSuiteScenario(currentScenario) || activeSuiteDocument);
     return {
-      title: 'Edit Constants JSON',
+      title: editingSuite ? 'Edit Suite Constants JSON' : 'Edit Constants JSON',
       fieldName: 'Constants',
-      currentValue: () => currentScenario?.random_generators || {},
+      currentValue: () => {
+        if (isSuiteScenario(currentScenario) || !activeSuiteDocument) {
+          return currentScenario?.random_generators || {};
+        }
+        return activeSuiteDocument.random_generators || {};
+      },
       apply: (parsed) => {
-        currentScenario.random_generators = parsed || {};
+        const next = parsed || {};
+        if (isSuiteScenario(currentScenario) || !activeSuiteDocument) {
+          currentScenario.random_generators = next;
+        } else {
+          activeSuiteDocument.random_generators = next;
+        }
       },
     };
   }
@@ -1061,6 +1551,25 @@ async function saveScenarioIfNamed() {
   selectedScenarioName = name;
 }
 
+async function persistActiveSuiteDocument() {
+  if (!activeSuitePath || !activeSuiteDocument || isSuiteScenario(currentScenario)) {
+    return;
+  }
+  const suite = await api(scenarioFileUrl(activeSuitePath));
+  if (!suite || typeof suite !== 'object') {
+    return;
+  }
+  suite.environments = activeSuiteDocument.environments || {};
+  suite.random_generators = activeSuiteDocument.random_generators || {};
+  if (activeSuiteDocument.selected_environment) {
+    suite.selected_environment = activeSuiteDocument.selected_environment;
+  }
+  await api(scenarioFileUrl(activeSuitePath), {
+    method: 'POST',
+    body: JSON.stringify(suite),
+  });
+}
+
 function openJsonDialog(target) {
   if (!currentScenario) {
     currentScenario = createEmptyScenario();
@@ -1091,6 +1600,9 @@ async function saveJsonDialog() {
   try {
     const parsed = parseOptionalJson(jsonDialogEditor.value, config.fieldName);
     config.apply(parsed);
+    if (currentJsonDialogTarget === 'environments' || currentJsonDialogTarget === 'random_generators') {
+      await persistActiveSuiteDocument();
+    }
     await saveScenarioIfNamed();
     closeJsonDialog();
     renderScenarioBuilder();
@@ -1166,47 +1678,6 @@ function bindScenarioField(element, updater) {
   element.addEventListener('change', () => element.setCustomValidity(''));
 }
 
-function bindScenarioJsonField(element, updater) {
-  const applyUpdate = () => {
-    if (!currentScenario) {
-      currentScenario = createEmptyScenario();
-    }
-    try {
-      updater(currentScenario, element);
-      element.setCustomValidity('');
-      renderScenarioBuilder();
-    } catch (error) {
-      element.setCustomValidity(error.message);
-      element.reportValidity();
-    }
-  };
-
-  element.addEventListener('input', () => element.setCustomValidity(''));
-  element.addEventListener('change', applyUpdate);
-  element.addEventListener('blur', applyUpdate);
-}
-
-function bindStepJsonField(element, updater) {
-  const applyUpdate = () => {
-    const step = getSelectedStep();
-    if (!step) {
-      return;
-    }
-    try {
-      updater(step, element);
-      element.setCustomValidity('');
-      renderScenarioBuilder();
-    } catch (error) {
-      element.setCustomValidity(error.message);
-      element.reportValidity();
-    }
-  };
-
-  element.addEventListener('input', () => element.setCustomValidity(''));
-  element.addEventListener('change', applyUpdate);
-  element.addEventListener('blur', applyUpdate);
-}
-
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 function stripAnsi(str) {
@@ -1220,21 +1691,31 @@ function escapeHtml(value) {
     .replaceAll('>', '&gt;');
 }
 
-function inlineMarkdown(text) {
-  return escapeHtml(text)
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>');
+function persistLastOpen() {
+  try {
+    sessionStorage.setItem(LAST_OPEN_STORAGE_KEY, JSON.stringify({
+      scenario: selectedScenarioName || '',
+      suite: activeSuitePath || '',
+    }));
+  } catch {
+    // Ignore quota / private-mode failures.
+  }
 }
 
-function renderMarkdown(markdown) {
-  if (!markdown) {
-    return '<p>No markdown report generated.</p>';
+function restoreLastOpen() {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(LAST_OPEN_STORAGE_KEY) || '{}');
+    return {
+      scenario: typeof parsed.scenario === 'string' ? parsed.scenario : '',
+      suite: typeof parsed.suite === 'string' ? parsed.suite : '',
+    };
+  } catch {
+    return {scenario: '', suite: ''};
   }
-  if (typeof marked !== 'undefined') {
-    return marked.parse(markdown);
-  }
-  // Fallback: return as preformatted text if marked.js not loaded
-  return `<pre>${escapeHtml(markdown)}</pre>`;
+}
+
+async function reopenScenarioFile(path, options = {}) {
+  await openScenario({path, name: path.split('/').pop() || path}, options);
 }
 
 async function loadScenarios() {
@@ -1244,12 +1725,30 @@ async function loadScenarios() {
     didExpandAllFolders = true;
   }
   renderExplorer();
-  if (!selectedScenarioName) {
-    const first = findFirstSuiteFile(scenarioTree.children);
-    if (first) {
-      expandedSuites.add(first.path);
-      await openScenario(first);
+  let openPath = selectedScenarioName;
+  let suitePath = activeSuitePath;
+  if (!openPath) {
+    const last = restoreLastOpen();
+    openPath = last.scenario;
+    suitePath = last.suite;
+  }
+  if (openPath) {
+    try {
+      if (suitePath && suitePath !== openPath) {
+        await reopenScenarioFile(suitePath);
+        await reopenScenarioFile(openPath, {fromSuite: true});
+        return;
+      }
+      await reopenScenarioFile(openPath);
+      return;
+    } catch {
+      selectedScenarioName = null;
     }
+  }
+  const first = findFirstSuiteFile(scenarioTree.children);
+  if (first) {
+    expandedSuites.add(first.path);
+    await openScenario(first);
   }
 }
 
@@ -1271,6 +1770,7 @@ function captureActiveSuiteDocument(scenario) {
     random_generators: scenario.random_generators || {},
     selected_environment: scenario.selected_environment || '',
     base_url: scenario.base_url || '',
+    description: scenario.description || '',
   };
 }
 
@@ -1293,50 +1793,57 @@ function rememberSuiteContext(path, scenario, fromSuite) {
   }
 }
 
+function hasSuiteContext() {
+  return Boolean(activeSuitePath) || isSuiteScenario(currentScenario);
+}
+
 function renderHierarchy() {
   const viewingSuite = isSuiteScenario(currentScenario);
-  const step = getSelectedStep();
-  const kind = viewingSuite ? 'Suite' : 'Scenario';
+  const hasSuite = hasSuiteContext();
   if (editorKind) {
-    editorKind.textContent = kind;
-    editorKind.className = `kind-pill ${viewingSuite ? 'kind-suite' : ''}`;
+    editorKind.textContent = 'Suite';
+    editorKind.className = 'kind-pill kind-suite';
   }
   if (editorTitle) {
-    editorTitle.textContent = viewingSuite ? 'Suite' : 'Scenario';
+    const suitePath = activeSuitePath || (viewingSuite ? selectedScenarioName : '');
+    editorTitle.textContent = suitePath ? fileLabel(suitePath) : 'Suite';
   }
   if (runTitle) {
-    runTitle.textContent = viewingSuite ? 'Run Suite' : 'Run Scenario';
+    runTitle.textContent = 'Run';
   }
   if (saveScenarioButton) {
-    saveScenarioButton.textContent = viewingSuite ? 'Save Suite' : 'Save Scenario';
+    saveScenarioButton.textContent = 'Save Scenario';
   }
   if (addStepButton) {
     addStepButton.classList.toggle('hidden', viewingSuite);
   }
-  const suiteHint = document.getElementById('suite-globals-hint');
-  if (suiteHint) {
-    suiteHint.classList.toggle('hidden', !viewingSuite);
-  }
   if (editRandomGeneratorsJsonButton) {
-    editRandomGeneratorsJsonButton.textContent = viewingSuite ? 'Edit Suite Constants' : 'Edit Constants';
+    editRandomGeneratorsJsonButton.textContent = 'Edit Suite Constants';
   }
   if (editEnvironmentsJsonButton) {
-    editEnvironmentsJsonButton.textContent = viewingSuite ? 'Edit Suite Environments' : 'Edit Environments';
+    editEnvironmentsJsonButton.textContent = 'Edit Suite Environments';
   }
   if (viewingSuite) {
     captureActiveSuiteDocument(currentScenario);
   }
   syncSuiteRunFields();
+  if (suiteSection) {
+    suiteSection.classList.toggle('hidden', !hasSuite);
+  }
+  if (scenarioSection) {
+    scenarioSection.classList.toggle('hidden', viewingSuite || !currentScenario);
+  }
   if (scenarioBuilder) {
     scenarioBuilder.classList.toggle('hidden', viewingSuite);
   }
   if (suitePanel) {
-    suitePanel.classList.toggle('hidden', !viewingSuite);
+    suitePanel.classList.toggle('hidden', !hasSuite);
   }
   renderBreadcrumb();
-  if (viewingSuite) {
+  if (hasSuite) {
     renderSuiteMembers();
   }
+  updateRunAvailability();
 }
 
 function renderBreadcrumb() {
@@ -1412,22 +1919,29 @@ function renderSuiteMembers() {
     return;
   }
   suiteMembers.innerHTML = '';
-  const members = Array.isArray(currentScenario?.scenarios) ? currentScenario.scenarios : [];
+  const viewingSuite = isSuiteScenario(currentScenario);
+  const members = viewingSuite
+    ? (Array.isArray(currentScenario?.scenarios) ? currentScenario.scenarios : [])
+    : activeSuiteMembers.slice();
   if (suiteMemberCount) {
     suiteMemberCount.textContent = `${members.length} scenario${members.length === 1 ? '' : 's'}`;
   }
   if (suiteDescription) {
-    suiteDescription.textContent = currentScenario?.description || 'This suite runs the listed scenarios in order.';
+    const text = viewingSuite
+      ? (currentScenario?.description || '')
+      : (activeSuiteDocument?.description || '');
+    suiteDescription.textContent = text || 'This suite runs the listed scenarios in order.';
   }
-  const folder = parentFolderPath(selectedScenarioName || '');
+  const folder = parentFolderPath((viewingSuite ? selectedScenarioName : activeSuitePath) || '');
   members.forEach((name, index) => {
     const fileName = String(name);
+    const memberPath = joinPath(folder, fileName);
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'suite-member';
+    button.className = `suite-member${memberPath === selectedScenarioName ? ' is-current' : ''}`;
     button.innerHTML = `<span>${index + 1}. ${escapeHtml(fileLabel(fileName))}</span><span class="tree-kind">Scenario</span>`;
     button.addEventListener('click', () => {
-      void openScenario({path: joinPath(folder, fileName), name: fileName}, {fromSuite: true});
+      void openScenario({path: memberPath, name: fileName}, {fromSuite: true});
     });
     suiteMembers.appendChild(button);
   });
@@ -1475,14 +1989,48 @@ async function openScenario(item, options = {}) {
           random_generators: inherited.random_generators || {},
           selected_environment: inherited.selected_environment || '',
           base_url: inherited.base_url || '',
+          description: inherited.description || '',
         };
       }
     } catch {
       // Scenario can still open without a parent suite.
     }
   }
+  persistLastOpen();
   renderExplorer();
   renderScenarioBuilder();
+}
+
+async function saveSuite() {
+  try {
+    if (isSuiteScenario(currentScenario)) {
+      const name = activeSuitePath || selectedScenarioName;
+      if (!name) {
+        alert('Open a suite first');
+        return;
+      }
+      const parsed = getValidatedScenarioPayload();
+      await api(scenarioFileUrl(name), {
+        method: 'POST',
+        body: JSON.stringify(parsed),
+      });
+      currentScenario = parsed;
+      selectedScenarioName = name;
+      selectedFolderPath = parentFolderPath(name);
+      captureActiveSuiteDocument(currentScenario);
+      await loadScenarios();
+      if (runOutput) {
+        runOutput.textContent = 'Suite saved.';
+      }
+      return;
+    }
+    await persistActiveSuiteDocument();
+    if (runOutput) {
+      runOutput.textContent = 'Suite saved.';
+    }
+  } catch (error) {
+    alert(error.message || String(error));
+  }
 }
 
 async function saveScenario() {
@@ -1590,70 +2138,6 @@ async function importScenarioFromFile(file) {
   }
 }
 
-function renderRunList(runs) {
-  runList.innerHTML = '';
-  runs.forEach((item) => {
-    const row = document.createElement('div');
-    row.className = 'list-row';
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'list-item';
-    if (item.id === selectedRunId) {
-      button.classList.add('active');
-    }
-    button.textContent = `${item.id}${item.label ? ` - ${item.label}` : ''}`;
-    button.addEventListener('click', () => openRun(item));
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'icon-button danger-subtle list-row-delete';
-    del.title = 'Delete this run';
-    del.setAttribute('aria-label', `Delete ${item.id}`);
-    del.textContent = '×';
-    del.addEventListener('click', (event) => {
-      event.stopPropagation();
-      deleteRun(item.id);
-    });
-    row.appendChild(button);
-    row.appendChild(del);
-    runList.appendChild(row);
-  });
-  if (clearRunsButton) {
-    clearRunsButton.disabled = runs.length === 0;
-  }
-}
-
-async function loadRuns() {
-  const runs = await api('/api/runs');
-  if (selectedRunId && !runs.some((item) => item.id === selectedRunId)) {
-    selectedRunId = null;
-  }
-  renderRunList(runs);
-  deleteRunButton.disabled = !selectedRunId;
-  if (!selectedRunId && runs.length > 0) {
-    await openRun(runs[0]);
-  } else if (runs.length === 0) {
-    reportSummary.innerHTML = '';
-    artifactGallery.innerHTML = '';
-    reportText.innerHTML = renderMarkdown(null);
-  }
-}
-
-function renderArtifacts(runId, artifacts) {
-  artifactGallery.innerHTML = '';
-  artifacts.filter((item) => item.name.endsWith('.png')).forEach((item) => {
-    const wrapper = document.createElement('figure');
-    wrapper.className = 'artifact';
-    const img = document.createElement('img');
-    img.src = item.url;
-    img.alt = item.name;
-    const cap = document.createElement('figcaption');
-    cap.textContent = item.name;
-    wrapper.appendChild(img);
-    wrapper.appendChild(cap);
-    artifactGallery.appendChild(wrapper);
-  });
-}
-
 function scenarioTotalsPassed(totals) {
   const t = totals || {};
   return (t.failure || 0) === 0 && (t.expected_mismatch || 0) === 0 && (t.success || 0) > 0;
@@ -1667,134 +2151,77 @@ function firstStepError(steps) {
   return failed.last_error || (failed.last_status != null ? `status ${failed.last_status}` : '');
 }
 
-function renderScenarioResults(summary) {
-  const scenario = summary.scenario;
-  if (!scenario) {
-    return '';
-  }
-  const totals = scenario.totals || {};
-  const children = Array.isArray(scenario.scenarios) ? scenario.scenarios : null;
-  const rate = ((totals.success_rate || 0) * 100).toFixed(1);
-  if (children) {
-    const rows = children.map((child) => {
-      const ct = child.totals || {};
-      const ok = scenarioTotalsPassed(ct);
-      const err = firstStepError(child.steps);
-      return `<tr class="${ok ? 'row-pass' : 'row-fail'}">
-        <td>${escapeHtml(child.name || child.file || '')}</td>
-        <td>${ok ? 'pass' : 'fail'}</td>
-        <td>${ct.success ?? 0}</td>
-        <td>${ct.failure ?? 0}</td>
-        <td>${escapeHtml(String(err || '—'))}</td>
-      </tr>`;
-    }).join('');
-    return `<h2>Suite results</h2>
-      <p>${totals.passed || 0} passed / ${totals.failed || 0} failed of ${totals.scenarios || children.length} scenarios (${rate}% step success)</p>
-      <table class="results-table">
-        <thead><tr><th>Scenario</th><th>Result</th><th>Success</th><th>Failure</th><th>First error</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>`;
-  }
-  if (!Array.isArray(scenario.steps) || scenario.steps.length === 0) {
-    return '';
-  }
-  const rows = scenario.steps.map((step) => {
-    const ok = (step.failure || 0) === 0 && (step.expected_mismatch || 0) === 0;
+function passFailRows(items) {
+  return items.map((item) => {
+    const ok = item.ok;
+    const error = ok ? '' : (item.error || '');
     return `<tr class="${ok ? 'row-pass' : 'row-fail'}">
-      <td>${escapeHtml(step.name || '')}</td>
-      <td>${escapeHtml(step.method || '')}</td>
-      <td>${escapeHtml(step.path || '')}</td>
-      <td>${step.success ?? 0}</td>
-      <td>${step.failure ?? 0}</td>
-      <td>${escapeHtml(String(step.last_error || '—'))}</td>
+      <td>${escapeHtml(item.name || '')}</td>
+      <td>${ok ? 'pass' : 'fail'}</td>
+      <td>${escapeHtml(error)}</td>
     </tr>`;
   }).join('');
-  return `<h2>Scenario results</h2>
-    <p>Success rate ${rate}% (${totals.success || 0} ok / ${totals.failure || 0} failed)</p>
-    <table class="results-table">
-      <thead><tr><th>Step</th><th>Method</th><th>Path</th><th>Success</th><th>Failure</th><th>Error</th></tr></thead>
+}
+
+function renderPassFailList(summary) {
+  const scenario = summary?.scenario;
+  if (!scenario) {
+    return '<p class="muted">No pass / fail results from this run.</p>';
+  }
+  const children = Array.isArray(scenario.scenarios) ? scenario.scenarios : null;
+  if (children) {
+    const rows = passFailRows(children.map((child) => ({
+      name: child.name || child.file || '',
+      ok: scenarioTotalsPassed(child.totals),
+      error: firstStepError(child.steps),
+    })));
+    return `<table class="results-table">
+      <thead><tr><th>Scenario</th><th>Result</th><th>Error</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
+  }
+  const steps = Array.isArray(scenario.steps) ? scenario.steps : [];
+  if (!steps.length) {
+    return '<p class="muted">No steps in this run.</p>';
+  }
+  const rows = passFailRows(steps.map((step) => ({
+    name: step.name || '',
+    ok: (step.failure || 0) === 0 && (step.expected_mismatch || 0) === 0,
+    error: String(step.last_error || ''),
+  })));
+  return `<table class="results-table">
+    <thead><tr><th>Step</th><th>Result</th><th>Error</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
 }
 
-async function openRun(item) {
-  selectedRunId = item.id;
-  deleteRunButton.disabled = false;
-  const data = await api(`/api/runs/${item.id}`);
-  const summary = data.summary || {};
-  const scenario = summary.scenario || {};
+function renderLastRunResults(summary) {
+  if (!reportText) {
+    return;
+  }
+  const scenario = summary?.scenario || {};
   const totals = scenario.totals || {};
-  const isSuite = scenario.kind === 'suite' || Array.isArray(scenario.scenarios);
-  const healthRps = summary.headline?.health_rps;
-  const boxes = [
-    `<div class="metric-box"><span>Label</span><strong>${escapeHtml(summary.label || item.id)}</strong></div>`,
-    `<div class="metric-box"><span>Target</span><strong>${escapeHtml(summary.target || '-')}</strong></div>`,
-  ];
-  if (isSuite) {
-    const failed = totals.failed || 0;
-    boxes.push(`<div class="metric-box"><span>Passed</span><strong>${totals.passed ?? '-'}</strong></div>`);
-    boxes.push(`<div class="metric-box${failed ? ' metric-fail' : ''}"><span>Failed</span><strong>${failed}</strong></div>`);
-  } else if (Array.isArray(scenario.steps) && scenario.steps.length > 0) {
-    const rate = ((totals.success_rate || 0) * 100).toFixed(1);
-    boxes.push(`<div class="metric-box"><span>Success rate</span><strong>${rate}%</strong></div>`);
-    boxes.push(`<div class="metric-box${totals.failure ? ' metric-fail' : ''}"><span>Failures</span><strong>${totals.failure ?? 0}</strong></div>`);
-  }
-  if (healthRps) {
-    boxes.push(`<div class="metric-box"><span>Health RPS</span><strong>${healthRps}</strong></div>`);
-    boxes.push(`<div class="metric-box"><span>Concurrent RPS</span><strong>${summary.headline?.concurrent_rps ?? '-'}</strong></div>`);
-  }
-  reportSummary.innerHTML = boxes.join('');
-  const resultsHtml = renderScenarioResults(summary);
-  const reportHtml = data.report ? renderMarkdown(data.report) : '';
-  reportText.innerHTML = resultsHtml || reportHtml || '<p>No results yet.</p>';
-  if (resultsHtml && reportHtml) {
-    reportText.innerHTML = `${resultsHtml}<details><summary>Report</summary>${reportHtml}</details>`;
-  }
-  renderArtifacts(item.id, data.artifacts || []);
-}
-
-async function deleteRun(runId) {
-  if (!runId) {
-    return;
-  }
-  deleteRunButton.disabled = true;
-  try {
-    await api(`/api/runs/${runId}/delete`, {method: 'POST', body: JSON.stringify({})});
-    if (selectedRunId === runId) {
-      selectedRunId = null;
+  const children = Array.isArray(scenario.scenarios) ? scenario.scenarios : null;
+  if (reportSummary) {
+    if (!summary || !scenario || (!children && !Array.isArray(scenario.steps))) {
+      reportSummary.innerHTML = '';
+    } else if (children) {
+      const failed = totals.failed || 0;
+      const passed = totals.passed ?? Math.max(children.length - failed, 0);
+      reportSummary.innerHTML = [
+        `<div class="metric-box"><span>Passed</span><strong>${passed}</strong></div>`,
+        `<div class="metric-box${failed ? ' metric-fail' : ''}"><span>Failed</span><strong>${failed}</strong></div>`,
+      ].join('');
+    } else {
+      const failed = (totals.failure || 0) + (totals.expected_mismatch || 0);
+      const passed = (scenario.steps || []).filter((step) => (step.failure || 0) === 0 && (step.expected_mismatch || 0) === 0).length;
+      reportSummary.innerHTML = [
+        `<div class="metric-box"><span>Passed</span><strong>${passed}</strong></div>`,
+        `<div class="metric-box${failed ? ' metric-fail' : ''}"><span>Failed</span><strong>${failed}</strong></div>`,
+      ].join('');
     }
-    await loadRuns();
-  } catch (error) {
-    deleteRunButton.disabled = !selectedRunId;
-    alert(String(error));
   }
-}
-
-async function deleteSelectedRun() {
-  await deleteRun(selectedRunId);
-}
-
-async function clearAllRuns() {
-  const runs = await api('/api/runs');
-  if (!runs.length) {
-    return;
-  }
-  if (!window.confirm(`Delete all ${runs.length} result folders?`)) {
-    return;
-  }
-  if (clearRunsButton) {
-    clearRunsButton.disabled = true;
-  }
-  try {
-    await api('/api/runs/clear', {method: 'POST', body: JSON.stringify({})});
-    selectedRunId = null;
-    await loadRuns();
-  } catch (error) {
-    if (clearRunsButton) {
-      clearRunsButton.disabled = false;
-    }
-    alert(String(error));
-  }
+  reportText.innerHTML = renderPassFailList(summary);
 }
 
 function renderSequenceTestResult(result) {
@@ -1855,6 +2282,7 @@ function stepCurlPayload(hydratePrior) {
     step_index: selectedStepIndex,
     base_url: `${target.scheme}://${target.host}:${target.port}`,
     selected_environment: getSelectedEnvironmentName(),
+    environment_overrides: environmentOverridesPayload(),
     context_vars: lastStepContextVars,
     hydrate_prior: hydratePrior,
   });
@@ -1863,7 +2291,7 @@ function stepCurlPayload(hydratePrior) {
 function stepCurlCacheKey() {
   const target = getRunTarget();
   const name = selectedScenarioName || currentScenario?.name || '';
-  return `${name}|${selectedStepIndex}|${target.host}|${target.port}|${getSelectedEnvironmentName()}`;
+  return `${name}|${selectedStepIndex}|${target.host}|${target.port}|${getSelectedEnvironmentName()}|${JSON.stringify(environmentOverridesPayload())}`;
 }
 
 function scheduleStepCurlPreview() {
@@ -1935,6 +2363,7 @@ function sequenceTestPayload() {
     scenario: currentScenario,
     base_url: `${target.scheme}://${target.host}:${target.port}`,
     selected_environment: getSelectedEnvironmentName(),
+    environment_overrides: environmentOverridesPayload(),
   });
 }
 
@@ -1943,9 +2372,8 @@ async function testAllSteps() {
     renderSequenceTestResult('Open a scenario with steps first.');
     return;
   }
-  const target = getRunTarget();
-  if (dockerRewriteHost && LOOPBACK_HOSTS.has(target.host) && !defaultTargetHost) {
-    renderSequenceTestResult(`Set Host to the authorization server IP. Docker rewrites localhost to ${dockerRewriteHost}.`);
+  if (unsatisfiedEnvironmentNames().length) {
+    renderSequenceTestResult('Set every required environment value before testing the sequence.');
     return;
   }
   if (testSequenceButton) {
@@ -1975,11 +2403,11 @@ async function testSelectedStep() {
     renderTestStepResult('Select a step first.');
     return;
   }
-  const target = getRunTarget();
-  if (dockerRewriteHost && LOOPBACK_HOSTS.has(target.host)) {
-    renderTestStepResult(`Host is localhost. In Docker that is rewritten to ${dockerRewriteHost}. Set Host to the machine where the API actually runs.`);
+  if (unsatisfiedEnvironmentNames().length) {
+    renderTestStepResult('Set every required environment value before testing a step.');
     return;
   }
+  const target = getRunTarget();
   testStepButton.disabled = true;
   renderTestStepResult('Testing selected step...');
   try {
@@ -1988,8 +2416,9 @@ async function testSelectedStep() {
       body: JSON.stringify(withActiveSuite({
         scenario: currentScenario,
         step_index: selectedStepIndex,
-        base_url: `${getRunTarget().scheme}://${getRunTarget().host}:${getRunTarget().port}`,
+        base_url: `${target.scheme}://${target.host}:${target.port}`,
         selected_environment: getSelectedEnvironmentName(),
+        environment_overrides: environmentOverridesPayload(),
       })),
     });
     rememberStepContextVars(result);
@@ -2004,38 +2433,39 @@ async function testSelectedStep() {
 }
 
 function setRunButtonsDisabled(disabled) {
-  if (regressionRunButton) {
-    regressionRunButton.disabled = disabled;
-  }
+  runInProgress = Boolean(disabled);
+  updateRunAvailability();
 }
 
 async function startRun() {
-  const scenarioName = scenarioNameInput.value.trim();
-  if (!scenarioName) {
-    alert('Open or save a scenario first');
+  const runFile = activeSuitePath || selectedScenarioName || scenarioNameInput.value.trim();
+  if (!runFile) {
+    alert('Open a suite first');
+    return;
+  }
+
+  if (unsatisfiedEnvironmentNames().length) {
+    alert('Set every required environment value before running tests.');
+    return;
+  }
+
+  if (!getSelectedEnvironmentName()) {
+    alert('Select an environment on the suite.');
     return;
   }
 
   const {scheme, host, port: inferredPort} = getRunTarget();
-  if (viewingSuite()) {
-    if (!getSelectedEnvironmentName()) {
-      alert('Select an environment on the suite. Host and port come from that environment’s server URL.');
-      return;
-    }
-  } else if (!host) {
-    alert('Host is required. Set it in the Run Scenario form (same as CLI --host).');
+  if (!host) {
+    alert('Set server in the suite environment to an IP or FQDN.');
     return;
   }
-  if (!viewingSuite() && dockerRewriteHost && LOOPBACK_HOSTS.has(host) && !defaultTargetHost) {
-    alert(`This UI runs in Docker and rewrites localhost to ${dockerRewriteHost} (this Mac). Set Host to the authorization server IP (same as CLI --host).`);
+  if (isForbiddenApiHost(host)) {
+    alert(ROUTABLE_HOST_HELP);
     return;
-  }
-  if (!viewingSuite()) {
-    persistRunTarget();
   }
 
   const formLabel = document.getElementById('run-label').value.trim();
-  const label = (!formLabel || formLabel === 'web_ui_run') ? 'regression' : formLabel;
+  const label = formLabel || 'regression';
 
   setRunButtonsDisabled(true);
   runSpinner.classList.remove('hidden');
@@ -2043,7 +2473,6 @@ async function startRun() {
 
   let progressTimer = null;
   const startTime = Date.now();
-  runProgressTrack.classList.remove('run-progress-track--overshoot');
   runProgressBar.style.transition = 'none';
   runProgressBar.style.width = '0%';
   runProgressTrack.setAttribute('aria-valuenow', 0);
@@ -2061,7 +2490,7 @@ async function startRun() {
   }, 500);
 
   const payload = {
-    scenario_file: `./examples/${scenarioName}`,
+    scenario_file: `./examples/${runFile}`,
     scheme,
     host,
     port: inferredPort,
@@ -2069,19 +2498,18 @@ async function startRun() {
     scenario_duration: 60,
     scenario_iterations: 1,
     scenario_environment: getSelectedEnvironmentName(),
-    scenario_secrets_file: document.getElementById('run-secrets-file').value.trim(),
+    environment_overrides: environmentOverridesPayload(),
     label,
     regression: true,
-    generate_report: false,
   };
   let runFailed = false;
   try {
     const result = await api('/api/runs', {method: 'POST', body: JSON.stringify(payload)});
     const logText = stripAnsi(result.stdout || '').trim();
-    runOutput.textContent = logText || 'Run completed. Select a run to review pass/fail results.';
-    await loadRuns();
-    if (result.run_id) {
-      await openRun({id: result.run_id});
+    runOutput.textContent = logText || 'Run completed.';
+    renderLastRunResults(result.summary);
+    if (result.status === 'completed_with_errors') {
+      runFailed = true;
     }
   } catch (error) {
     runFailed = true;
@@ -2089,6 +2517,9 @@ async function startRun() {
     try {
       const inner = JSON.parse(msg.replace(/^Error:\s*/, ''));
       const detail = inner?.detail;
+      if (detail?.summary) {
+        renderLastRunResults(detail.summary);
+      }
       if (detail?.stdout) msg = detail.stdout.replace(/\x1b\[[0-9;]*m/g, '').trim();
       else if (typeof detail === 'string') msg = detail;
     } catch { /* use raw msg */ }
@@ -2109,21 +2540,59 @@ async function startRun() {
     }
     setTimeout(() => {
       runProgressWrap.classList.add('hidden');
-      runProgressTrack.classList.remove('run-progress-track--overshoot');
       runProgressBar.classList.remove('run-progress-bar--error');
-      reportProgressWrap.classList.add('hidden');
     }, 3000);
   }
 }
 
+function getStoredTheme() {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    return stored === 'light' || stored === 'dark' ? stored : THEME_DEFAULT;
+  } catch {
+    return THEME_DEFAULT;
+  }
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const toggle = document.getElementById('theme-toggle');
+  if (!toggle) {
+    return;
+  }
+  const next = theme === 'dark' ? 'light' : 'dark';
+  toggle.setAttribute('aria-label', `Switch to ${next} mode`);
+  toggle.title = `Switch to ${next} mode`;
+}
+
+function initTheme() {
+  applyTheme(getStoredTheme());
+  const toggle = document.getElementById('theme-toggle');
+  if (!toggle) {
+    return;
+  }
+  toggle.addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, next);
+    } catch {
+      // Ignore storage failures and still apply the theme for this session.
+    }
+    applyTheme(next);
+  });
+}
+
+initTheme();
+
 document.getElementById('refresh-scenarios').addEventListener('click', loadScenarios);
 document.getElementById('new-scenario').addEventListener('click', startNewScenario);
 document.getElementById('new-folder').addEventListener('click', createFolder);
-document.getElementById('refresh-runs').addEventListener('click', loadRuns);
-if (clearRunsButton) {
-  clearRunsButton.addEventListener('click', clearAllRuns);
-}
 document.getElementById('save-scenario').addEventListener('click', saveScenario);
+if (saveSuiteButton) {
+  saveSuiteButton.addEventListener('click', () => {
+    void saveSuite();
+  });
+}
 importScenarioButton.addEventListener('click', () => importScenarioFileInput.click());
 importScenarioFileInput.addEventListener('change', async () => {
   const [file] = importScenarioFileInput.files || [];
@@ -2150,7 +2619,13 @@ if (testSequenceButton) {
 if (copyStepCurlButton) {
   copyStepCurlButton.addEventListener('click', copyStepCurl);
 }
-deleteRunButton.addEventListener('click', deleteSelectedRun);
+document.getElementById('clear-session-env')?.addEventListener('click', () => {
+  clearSessionEnvOverrides();
+  lastRequiredEnvNames = '';
+  updateRunAvailability();
+  lastHydratedCurlKey = '';
+  scheduleStepCurlPreview();
+});
 
 bindScenarioField(scenarioBaseUrl, (scenario, element) => {
   scenario.base_url = element.value.trim();
@@ -2162,8 +2637,12 @@ scenarioEnvironmentSelect.addEventListener('change', () => {
     currentScenario = createEmptyScenario();
   }
   currentScenario.selected_environment = scenarioEnvironmentSelect.value;
+  if (activeSuiteDocument) {
+    activeSuiteDocument.selected_environment = scenarioEnvironmentSelect.value;
+  }
   lastHydratedCurlKey = '';
   lastStepContextVars = {};
+  lastRequiredEnvNames = '';
   renderScenarioBuilder();
 });
 
@@ -2178,7 +2657,7 @@ jsonDialogCancelButton.addEventListener('click', closeJsonDialog);
 jsonDialogCancelTopButton.addEventListener('click', closeJsonDialog);
 jsonDialogSaveButton.addEventListener('click', saveJsonDialog);
 jsonDialog.addEventListener('click', (event) => {
-  if (event.target === jsonDialog) {
+  if (event.target === jsonDialog || event.target.dataset.close === 'true') {
     closeJsonDialog();
   }
 });
@@ -2233,22 +2712,4 @@ stepStopOnFailureInput.addEventListener('change', () => {
 });
 
 loadScenarios();
-loadRuns();
-loadRuntimeInfo();
-restoreRunTarget();
-if (runHostInput) {
-  runHostInput.addEventListener('input', () => {
-    persistRunTarget();
-    updateRunTargetHint();
-    lastHydratedCurlKey = '';
-    scheduleStepCurlPreview();
-  });
-}
-if (runPortInput) {
-  runPortInput.addEventListener('input', () => {
-    persistRunTarget();
-    updateRunTargetHint();
-    lastHydratedCurlKey = '';
-    scheduleStepCurlPreview();
-  });
-}
+updateRunAvailability();

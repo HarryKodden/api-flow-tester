@@ -1,243 +1,276 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Regression Tester</title>
-    <link rel="stylesheet" href="/static/app.css" />
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem('lti.theme');
+          document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+        } catch (e) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Sora:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}" />
   </head>
   <body>
-    <div class="page-shell">
-      <aside class="sidebar">
-        <h1>Regression Tester</h1>
-        <p class="muted">Suites, scenarios, and one-pass regression runs.</p>
-        <section class="sidebar-explorer">
-          <div class="section-head">
-            <h2>Library</h2>
-            <div class="actions explorer-actions">
-              <button id="new-scenario" class="ghost" type="button" title="New test">New</button>
-              <button id="new-folder" class="ghost" type="button" title="New folder">Folder</button>
-              <button id="refresh-scenarios" class="ghost" type="button">Refresh</button>
-            </div>
-          </div>
-          <div id="scenario-list" class="file-explorer"></div>
-        </section>
-        <section class="sidebar-runs">
-          <div class="section-head">
-            <h2>Runs</h2>
-            <div class="actions explorer-actions">
-              <button id="refresh-runs" class="ghost" type="button">Refresh</button>
-              <button id="clear-runs" class="ghost danger-subtle" type="button" title="Delete all result folders">Clear</button>
-            </div>
-          </div>
-          <div id="run-list" class="list"></div>
-        </section>
-      </aside>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">Regression <span>Tester</span></div>
+        <div class="brand-sub">Suites, scenarios, one-pass runs</div>
+      </div>
+      <div class="topbar-actions">
+        <button id="theme-toggle" class="icon-btn theme-toggle" type="button" aria-label="Switch to light mode" title="Switch to light mode">
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>
+          </svg>
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M21 14.3A8.5 8.5 0 1 1 9.7 3 7 7 0 0 0 21 14.3z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
 
-      <main class="content">
-        <section class="card">
-          <div class="section-head">
-            <div class="editor-heading">
-              <span id="editor-kind" class="kind-pill">Scenario</span>
-              <h2 id="editor-title">Scenario</h2>
-            </div>
-            <div class="actions">
-              <input id="scenario-name" type="text" placeholder="folder/test.json" />
-              <button id="import-scenario" class="ghost">Import Postman/Insomnia</button>
-              <input id="import-scenario-file" type="file" accept="application/json,text/yaml,application/x-yaml,.json,.yaml,.yml" class="hidden" />
-              <button id="add-step" class="ghost">Add Step</button>
-              <button id="save-scenario">Save Scenario</button>
-            </div>
-          </div>
-          <nav id="editor-crumb" class="editor-crumb" aria-label="Suite, scenario, and step">
-            <span class="muted">Open a suite or scenario from the library.</span>
-          </nav>
-          <p id="suite-globals-hint" class="muted run-mode-hint hidden">Select a suite first. Its environment applies to every scenario you open from this suite.</p>
-          <div id="scenario-meta" class="scenario-meta grid scenario-grid-top">
-            <label id="scenario-base-url-wrap">Base URL <input id="scenario-base-url" placeholder="http://localhost:8080" /></label>
-            <label>Selected Environment
-              <select id="scenario-environment"></select>
-            </label>
-            <label>Constants (JSON)
-              <div class="json-edit-row">
-                <input id="random-generators-summary" readonly hidden/>
-                <button id="edit-random-generators-json" type="button" class="ghost">Edit Constants</button>
+    <main class="workspace">
+      <div class="inspect-layout">
+        <aside class="rail">
+          <section class="panel sidebar-explorer">
+            <header class="panel-head">
+              <div>
+                <h2>Library</h2>
+                <p>Suites and scenarios</p>
               </div>
-            </label>
-            <label>Environments (JSON)
-              <div class="json-edit-row">
-                <input id="scenario-environments-summary" readonly hidden/>
-                <button id="edit-environments-json" type="button" class="ghost">Edit Environments</button>
+              <div class="actions explorer-actions">
+                <button id="new-scenario" class="ghost" type="button" title="New test">New</button>
+                <button id="new-folder" class="ghost" type="button" title="New folder">Folder</button>
+                <button id="refresh-scenarios" class="ghost" type="button">Refresh</button>
               </div>
-            </label>
-          </div>
-          <div id="suite-panel" class="suite-panel hidden">
-            <div class="lane-head">
-              <h3>Scenarios in this suite</h3>
-              <span id="suite-member-count" class="pill">0</span>
-            </div>
+            </header>
+            <div id="scenario-list" class="file-explorer"></div>
+          </section>
+        </aside>
+
+        <div class="workspace-main">
+          <section id="suite-section" class="panel card hierarchy-panel">
+            <header class="panel-head section-head">
+              <div class="editor-heading">
+                <span id="editor-kind" class="kind-pill kind-suite">Suite</span>
+                <h2 id="editor-title">Suite</h2>
+              </div>
+              <div class="actions">
+                <button id="save-suite" class="ghost" type="button">Save Suite</button>
+              </div>
+            </header>
+            <nav id="editor-crumb" class="editor-crumb" aria-label="Suite, scenario, and step">
+              <span class="muted">Open a suite from the library.</span>
+            </nav>
             <p id="suite-description" class="muted suite-description"></p>
+            <div id="scenario-meta" class="scenario-meta grid scenario-grid-top">
+              <label id="scenario-base-url-wrap" class="hidden">Base URL <input id="scenario-base-url" placeholder="http://192.168.1.10:8080" /></label>
+              <label>Selected Environment
+                <select id="scenario-environment"></select>
+              </label>
+              <label>Constants
+                <div class="json-edit-row">
+                  <button id="edit-random-generators-json" type="button" class="ghost">Edit Suite Constants</button>
+                </div>
+              </label>
+              <label>Environments
+                <div class="json-edit-row">
+                  <button id="edit-environments-json" type="button" class="ghost">Edit Suite Environments</button>
+                </div>
+              </label>
+            </div>
+            <div id="session-env-wrap" class="session-env-wrap hidden">
+              <div class="lane-head">
+                <h4>Missing environment values</h4>
+                <button id="clear-session-env" type="button" class="ghost">Clear</button>
+              </div>
+              <p class="muted">Empty, removed from the environment, still a template, or localhost. Enter a value. Kept for this browser session.</p>
+              <div id="session-env-fields" class="env-dialog-fields"></div>
+              <p id="session-env-empty" class="muted">All required values are set in the selected environment.</p>
+              <p id="session-env-run-hint" class="muted run-mode-hint">Run Tests stays disabled until every field has a value.</p>
+            </div>
+          </section>
+
+          <section id="run-section" class="panel card controls">
+            <header class="panel-head section-head">
+              <div>
+                <h2 id="run-title">Run</h2>
+                <p>One pass through the suite. Failures stop that scenario.</p>
+              </div>
+            </header>
+            <div class="grid">
+              <label>Label <input id="run-label" value="regression" /></label>
+            </div>
+            <p id="run-target-hint" class="muted run-mode-hint">Host and port come from the selected suite environment.</p>
+            <div class="actions row-end">
+              <button id="regression-run" class="primary" type="button" disabled>Run Tests</button>
+              <span id="run-spinner" class="run-spinner hidden" aria-hidden="true"></span>
+            </div>
+            <div id="run-progress-wrap" class="run-progress-wrap hidden" aria-label="Run progress">
+              <div class="run-progress-header">
+                <span id="run-progress-label">Running…</span>
+                <span id="run-progress-time">0 / 0 s</span>
+              </div>
+              <div class="run-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="run-progress-bar-track">
+                <div id="run-progress-bar" class="run-progress-bar"></div>
+              </div>
+            </div>
+            <details class="output-log-wrap">
+              <summary>Run output</summary>
+              <pre id="run-output" class="console">No run started yet.</pre>
+            </details>
+          </section>
+
+          <section id="suite-panel" class="panel card">
+            <header class="panel-head section-head">
+              <div>
+                <h2>Scenarios</h2>
+                <p>Open a scenario to inspect steps</p>
+              </div>
+              <span id="suite-member-count" class="pill">0</span>
+            </header>
             <div id="suite-members" class="suite-members"></div>
-          </div>
-          <div id="scenario-builder" class="scenario-builder">
-            <div class="scenario-lane">
-              <div class="lane-head">
-                <h3>Step Sequence</h3>
-                <span id="step-count" class="pill">0 steps</span>
-                <button id="test-sequence" type="button" class="primary" title="Run every step in order" disabled>Test Sequence</button>
+          </section>
+
+          <section id="scenario-section" class="panel card hidden">
+            <header class="panel-head section-head">
+              <div class="editor-heading">
+                <span class="kind-pill">Scenario</span>
+                <h2>Scenario</h2>
               </div>
-              <div id="step-sequence" class="step-sequence"></div>
-              <pre id="sequence-test-output" class="console step-test-output">No sequence test run yet.</pre>
-            </div>
-            <div class="scenario-detail">
-              <div class="lane-head">
-                <h3>Selected Step</h3>
-                <span id="selected-step-label" class="pill">none</span>
+              <div class="actions">
+                <input id="scenario-name" type="text" placeholder="folder/test.json" />
+                <button id="import-scenario" class="ghost">Import Postman/Insomnia</button>
+                <input id="import-scenario-file" type="file" accept="application/json,text/yaml,application/x-yaml,.json,.yaml,.yml" class="hidden" />
+                <button id="add-step" class="ghost">Add Step</button>
+                <button id="save-scenario" class="primary">Save Scenario</button>
               </div>
-              <div id="step-detail-empty" class="empty-state">Select a step block or add a new one.</div>
-              <div id="step-detail-form" class="step-detail-form hidden">
-                <div class="actions row-end step-test-actions">
-                  <button id="test-step" type="button" class="primary">Test Step</button>
-                  <button id="step-delete" type="button" class="icon-button danger-subtle" aria-label="Delete step" title="Delete step">
-                    <span aria-hidden="true">🗑</span>
-                  </button>
+            </header>
+            <div id="scenario-builder" class="scenario-builder">
+              <div class="scenario-lane">
+                <div class="lane-head">
+                  <h3>Step Sequence</h3>
+                  <span id="step-count" class="pill">0 steps</span>
+                  <button id="test-sequence" type="button" class="primary" title="Run every step in order" disabled>Test Sequence</button>
                 </div>
-                <div class="step-curl-wrap">
-                  <div class="lane-head">
-                    <h4>curl</h4>
-                    <button id="copy-step-curl" type="button" class="ghost" disabled>Copy</button>
+                <div id="step-sequence" class="step-sequence"></div>
+                <pre id="sequence-test-output" class="console step-test-output">No sequence test run yet.</pre>
+              </div>
+              <div class="scenario-detail">
+                <div class="lane-head">
+                  <h3>Selected Step</h3>
+                  <span id="selected-step-label" class="pill">none</span>
+                </div>
+                <div id="step-detail-empty" class="empty-state">Select a step block or add a new one.</div>
+                <div id="step-detail-form" class="step-detail-form hidden">
+                  <div class="actions row-end step-test-actions">
+                    <button id="test-step" type="button" class="primary">Test Step</button>
+                    <button id="step-delete" type="button" class="icon-button danger-subtle" aria-label="Delete step" title="Delete step">
+                      <span aria-hidden="true">🗑</span>
+                    </button>
                   </div>
-                  <pre id="step-curl" class="console step-curl">Select a step to see curl.</pre>
-                </div>
-                <div class="step-detail-toolbar">
-                  <button id="step-move-up" type="button" class="ghost toolbar-action">Move Up</button>
-                  <button id="step-move-down" type="button" class="ghost toolbar-action">Move Down</button>
-                </div>
-                <div class="grid">
-                  <label>Name <input id="step-name" /></label>
-                  <label>Method
-                    <select id="step-method">
-                      <option>GET</option>
-                      <option>POST</option>
-                      <option>PUT</option>
-                      <option>DELETE</option>
-                      <option>PATCH</option>
-                    </select>
-                  </label>
-                  <label>Path
-                    <input id="step-path" placeholder="/api/users/me" />
-                    <span id="step-path-resolved" class="muted step-resolved"></span>
-                  </label>
-                  <label>Timeout (s) <input id="step-timeout" type="number" min="1" /></label>
-                  <label>Expected Status
-                    <input id="step-expected-status" placeholder="200 or 200,201,204" />
-                  </label>
-                  <label>Save Response As <input id="step-save-response-as" placeholder="response_obj" /></label>
-                </div>
-                <div class="grid scenario-grid-bottom">
-                  <label>Headers (JSON)
-                    <div class="json-edit-row">
-                      <input id="step-headers-summary" readonly hidden/>
-                      <button id="edit-step-headers-json" type="button" class="ghost">Edit JSON</button>
+                  <div class="step-curl-wrap">
+                    <div class="lane-head">
+                      <h4>curl</h4>
+                      <button id="copy-step-curl" type="button" class="ghost" disabled>Copy</button>
                     </div>
+                    <pre id="step-curl" class="console step-curl">Select a step to see curl.</pre>
+                  </div>
+                  <div class="step-detail-toolbar">
+                    <button id="step-move-up" type="button" class="ghost toolbar-action">Move Up</button>
+                    <button id="step-move-down" type="button" class="ghost toolbar-action">Move Down</button>
+                  </div>
+                  <div class="grid">
+                    <label>Name <input id="step-name" /></label>
+                    <label>Method
+                      <select id="step-method">
+                        <option>GET</option>
+                        <option>POST</option>
+                        <option>PUT</option>
+                        <option>DELETE</option>
+                        <option>PATCH</option>
+                      </select>
+                    </label>
+                    <label>Path
+                      <input id="step-path" placeholder="/api/users/me" />
+                      <span id="step-path-resolved" class="muted step-resolved"></span>
+                    </label>
+                    <label>Timeout (s) <input id="step-timeout" type="number" min="1" /></label>
+                    <label>Expected Status
+                      <input id="step-expected-status" placeholder="200 or 200,201,204" />
+                    </label>
+                    <label>Save Response As <input id="step-save-response-as" placeholder="response_obj" /></label>
+                  </div>
+                  <div class="grid scenario-grid-bottom json-field-actions">
+                    <button id="edit-step-headers-json" type="button" class="json-field-btn" data-label="Headers (JSON)" aria-label="Edit Headers (JSON)">
+                      <span class="json-field-title">Headers (JSON)</span>
+                      <span class="json-field-flag" hidden>Set</span>
+                    </button>
+                    <button id="edit-step-json" type="button" class="json-field-btn" data-label="Request body (JSON)" aria-label="Edit Request body (JSON)">
+                      <span class="json-field-title">Request body (JSON)</span>
+                      <span class="json-field-flag" hidden>Set</span>
+                    </button>
+                    <button id="edit-step-save-json" type="button" class="json-field-btn" data-label="Save mapping (JSON)" aria-label="Edit Save mapping (JSON)">
+                      <span class="json-field-title">Save mapping (JSON)</span>
+                      <span class="json-field-flag" hidden>Set</span>
+                    </button>
+                    <button id="edit-step-expected-json" type="button" class="json-field-btn" data-label="Expected JSON" aria-label="Edit Expected JSON">
+                      <span class="json-field-title">Expected JSON</span>
+                      <span class="json-field-flag" hidden>Set</span>
+                    </button>
+                  </div>
+                  <label class="toggle-row">
+                    <input id="step-stop-on-failure" type="checkbox" />
+                    <span>Stop scenario iteration on failure</span>
                   </label>
-                  <label>Request JSON Body (JSON)
-                    <div class="json-edit-row">
-                      <input id="step-json-summary" readonly hidden/>
-                      <button id="edit-step-json" type="button" class="ghost">Edit JSON</button>
-                    </div>
-                  </label>
-                  <label>Save Mapping (JSON)
-                    <div class="json-edit-row">
-                      <input id="step-save-summary" readonly hidden/>
-                      <button id="edit-step-save-json" type="button" class="ghost">Edit JSON</button>
-                    </div>
-                  </label>
-                  <label>Expected JSON Contains (JSON)
-                    <div class="json-edit-row">
-                      <input id="step-expected-json-summary" readonly hidden/>
-                      <button id="edit-step-expected-json" type="button" class="ghost">Edit JSON</button>
-                    </div>
-                  </label>
+                  <details class="output-log-wrap">
+                    <summary>Step test output</summary>
+                    <pre id="step-test-output" class="console step-test-output">No step test run yet.</pre>
+                  </details>
                 </div>
-                <label class="toggle-row">
-                  <input id="step-stop-on-failure" type="checkbox" />
-                  <span>Stop scenario iteration on failure</span>
-                </label>
-                <details class="output-log-wrap">
-                  <summary>Step test output</summary>
-                  <pre id="step-test-output" class="console step-test-output">No step test run yet.</pre>
-                </details>
               </div>
             </div>
-          </div>
-          <details class="json-preview-wrap">
-            <summary>Scenario JSON Preview</summary>
-            <textarea id="scenario-editor" spellcheck="false" readonly></textarea>
-          </details>
-        </section>
+            <details class="json-preview-wrap">
+              <summary>Scenario JSON Preview</summary>
+              <textarea id="scenario-editor" spellcheck="false" readonly></textarea>
+            </details>
+          </section>
 
-        <section class="card controls">
-          <div class="section-head">
-            <h2 id="run-title">Run Suite</h2>
-          </div>
-          <div class="grid">
-            <label id="run-host-wrap">Host <input id="run-host" type="text" value="" placeholder="localhost" title="Same as CLI --host. Overrides the scenario Base URL." autocomplete="off" /></label>
-            <label id="run-port-wrap">Port <input id="run-port" type="number" value="" placeholder="8090" title="Same as CLI --port" /></label>
-            <label>Secrets File <input id="run-secrets-file" value="" placeholder="./secrets.enc.yaml" title="Optional JSON/YAML/SOPS file for ${secret:name} references" /></label>
-            <label>Label <input id="run-label" value="regression" /></label>
-          </div>
-          <p id="run-target-hint" class="muted run-mode-hint">Each test runs once. Failures stop that scenario; the suite summary still lists every result.</p>
-          <div class="actions row-end">
-            <button id="regression-run" class="primary" type="button">Run Tests</button>
-            <span id="run-spinner" class="run-spinner hidden" aria-hidden="true"></span>
-          </div>
-          <div id="run-progress-wrap" class="run-progress-wrap hidden" aria-label="Run progress">
-            <div class="run-progress-header">
-              <span id="run-progress-label">Running…</span>
-              <span id="run-progress-time">0 / 0 s</span>
-            </div>
-            <div class="run-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="run-progress-bar-track">
-              <div id="run-progress-bar" class="run-progress-bar"></div>
-            </div>
-          </div>
-          <div id="report-progress-wrap" class="run-progress-wrap hidden" aria-label="Report generation progress">
-            <div class="run-progress-header">
-              <span id="report-progress-label">Report generation…</span>
-              <span id="report-progress-time">0 / 20 s</span>
-            </div>
-            <div class="run-progress-track run-progress-track--report" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="report-progress-bar-track">
-              <div id="report-progress-bar" class="run-progress-bar run-progress-bar--report"></div>
-            </div>
-          </div>
-          <details class="output-log-wrap">
-            <summary>Run output</summary>
-            <pre id="run-output" class="console">No run started yet.</pre>
-          </details>
-        </section>
-
-        <section class="card">
-          <div class="section-head">
-            <h2>Results</h2>
-            <div class="actions">
-              <button id="delete-run" type="button" class="icon-button danger-subtle" aria-label="Delete selected run" title="Delete selected run" disabled>
-                <span aria-hidden="true">🗑</span>
-              </button>
-            </div>
-          </div>
-          <div id="report-summary" class="report-summary"></div>
-          <div id="artifact-gallery" class="gallery"></div>
-          <article id="report-text" class="report"></article>
-        </section>
-      </main>
-    </div>
+          <section class="panel card">
+            <header class="panel-head section-head">
+              <div>
+                <h2>Results</h2>
+                <p>Pass / fail from the last run</p>
+              </div>
+            </header>
+            <div id="report-summary" class="report-summary"></div>
+            <article id="report-text" class="report">
+              <p class="muted">Run tests to see pass / fail here.</p>
+            </article>
+          </section>
+        </div>
+      </div>
+    </main>
 
     <div id="json-dialog" class="json-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="json-dialog-title">
+      <div class="json-dialog-backdrop" data-close="true"></div>
       <div class="json-dialog-card">
-        <div class="section-head">
-          <h2 id="json-dialog-title">Edit JSON</h2>
-          <button id="json-dialog-cancel-top" type="button" class="ghost">Close</button>
-        </div>
+        <header class="modal-head section-head">
+          <div>
+            <h2 id="json-dialog-title">Edit JSON</h2>
+            <p class="muted">Saved into the open scenario</p>
+          </div>
+          <button id="json-dialog-cancel-top" type="button" class="icon-btn">Close</button>
+        </header>
         <textarea id="json-dialog-editor" spellcheck="false"></textarea>
         <div class="actions row-end">
           <button id="json-dialog-cancel" type="button" class="ghost">Cancel</button>
@@ -246,7 +279,6 @@
       </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v={{ asset_version }}"></script>
   </body>
 </html>

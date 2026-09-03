@@ -13,7 +13,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -152,26 +152,77 @@ class _JSONHandler(BaseHTTPRequestHandler):
         return
 
 
+class _ReusableHTTPServer(HTTPServer):
+    allow_reuse_address = True
+
+
 _CIMD_SERVERS: dict[int, HTTPServer] = {}
+_CIMD_URLS: dict[int, str] = {}
 _CIMD_LOCK = threading.Lock()
 
 
-def start_cimd_metadata_server(port: int, metadata: dict[str, Any]) -> str:
-    """Serve CIMD client metadata JSON on 127.0.0.1:port. Idempotent per port."""
-    body = json.dumps(metadata).encode("utf-8")
+def stop_cimd_metadata_servers() -> None:
+    with _CIMD_LOCK:
+        servers = list(_CIMD_SERVERS.values())
+        _CIMD_SERVERS.clear()
+        _CIMD_URLS.clear()
+    for server in servers:
+        try:
+            server.shutdown()
+        except Exception:
+            pass
+        try:
+            server.server_close()
+        except Exception:
+            pass
 
-    class Handler(_JSONHandler):
-        payload = body
+
+def start_cimd_metadata_server(
+    port: int,
+    metadata: dict[str, Any],
+    *,
+    advertise_host: str = "127.0.0.1",
+) -> str:
+    """Serve CIMD client metadata. Reuses a live server on the same port, or binds another if busy."""
+    host = (advertise_host or "127.0.0.1").strip() or "127.0.0.1"
+    requested = int(port)
 
     with _CIMD_LOCK:
-        existing = _CIMD_SERVERS.get(port)
+        existing = _CIMD_SERVERS.get(requested)
         if existing is not None:
-            return f"http://127.0.0.1:{port}/client.json"
-        server = HTTPServer(("127.0.0.1", port), Handler)
+            return _CIMD_URLS.get(requested, f"http://{host}:{requested}/client.json")
+
+        holder: dict[str, bytes] = {"payload": b"{}"}
+
+        class Handler(_JSONHandler):
+            def do_GET(self):  # noqa: N802
+                body = holder["payload"]
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        try:
+            server = _ReusableHTTPServer(("0.0.0.0", requested), Handler)
+        except OSError as exc:
+            if getattr(exc, "errno", None) not in {48, 98}:
+                raise
+            server = _ReusableHTTPServer(("0.0.0.0", 0), Handler)
+
+        actual_port = int(server.server_address[1])
+        url = f"http://{host}:{actual_port}/client.json"
+        payload = dict(metadata or {})
+        payload["client_id"] = url
+        holder["payload"] = json.dumps(payload).encode("utf-8")
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        _CIMD_SERVERS[port] = server
-        return f"http://127.0.0.1:{port}/client.json"
+        _CIMD_SERVERS[requested] = server
+        _CIMD_URLS[requested] = url
+        if actual_port != requested:
+            _CIMD_SERVERS[actual_port] = server
+            _CIMD_URLS[actual_port] = url
+        return url
 
 
 def form_encode(data: Any) -> str | None:

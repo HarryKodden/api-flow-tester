@@ -2,25 +2,24 @@
 
 HTTP/API regression facility: suites, scenarios, and one-pass runs with a web UI.
 
-The CLI entrypoint is still `bin/loadtest.sh`. The product is a regression tester, not a load tester.
+The CLI entrypoint is still `bin/test.sh`. The product is a regression tester, not a load tester.
 
 ## Features
 - Suite → scenario → step tests with payload templating and named environments
 - Web UI for browsing, editing, and running suites/scenarios
-- One-pass regression: one user, one iteration, fail on errors, skip diagrams
-- Random data generators and secret files (`${secret:name}`, JSON/YAML/SOPS)
+- One-pass regression: one user, one iteration, fail on errors
+- Random data generators and named environments
 - Import scenarios from Postman collections or Insomnia exports
 - Block-based scenario editor with per-step forms, drag-and-drop reordering, and step/sequence dry-runs
-- Live run UX with spinner and pass/fail result tables
+- Live run UX with spinner and a pass/fail list
 
 ## Repository Layout
-- `bin/loadtest.sh` - runner (use `--regression` for the UI/CLI default)
+- `bin/test.sh` - runner (use `--regression` for the UI/CLI default)
 - `tools/scenario_runner.py` - scenario/suite engine
 - `webapp/app.py` - FastAPI backend
 - `webapp/templates/` - frontend HTML
 - `webapp/static/` - frontend JS/CSS
 - `examples/` - suites and scenarios
-- `results/` - run output
 - `requirements.txt` - Python deps
 
 ## Quick Start
@@ -37,13 +36,13 @@ Then open:
 http://127.0.0.1:9011
 ```
 
-To target a service running on the host machine, use `host.docker.internal` as the host (for example `http://host.docker.internal:8080`).
+To target a service, set the environment `server` (and `--host` if you pass one) to a reachable IP or FQDN. Do not use `localhost`, `127.0.0.1`, or `host.docker.internal`.
 
 CLI runs use the same image:
 
 ```bash
-docker compose run --rm api-flow-tester ./bin/loadtest.sh \
-  --host host.docker.internal \
+docker compose run --rm api-flow-tester ./bin/test.sh \
+  --host 192.168.1.10 \
   --port 8080 \
   --scenario-file ./examples/oauth2-server/suite-local.json \
   --regression \
@@ -57,7 +56,7 @@ cd api-flow-tester
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-chmod +x bin/loadtest.sh
+chmod +x bin/test.sh
 ```
 
 Start the web frontend:
@@ -82,13 +81,13 @@ Current web UI capabilities:
 - test a selected step or the full sequence from the editor
 - run the open suite or scenario once (regression; no load-test knobs)
 - view live running state with spinner + disabled run button
-- read cleaned run logs and pass/fail result tables
+- read the last run’s pass/fail list (not persisted; no markdown report)
 
 Run a suite (one pass, fail on errors):
 
 ```bash
-./bin/loadtest.sh \
-  --host localhost \
+./bin/test.sh \
+  --host 192.168.1.10 \
   --port 8080 \
   --scenario-file ./examples/oauth2-server/suite-proxy.json \
   --regression \
@@ -97,7 +96,7 @@ Run a suite (one pass, fail on errors):
 
 Run a single scenario the same way, pointing `--scenario-file` at a `test_*.json`.
 
-The CLI can still drive ApacheBench / Socket.IO load probes. That is optional and not exposed in the UI.
+The CLI can still drive optional ApacheBench probes. That is not exposed in the UI.
 
 <details>
 <summary>Optional load-probe CLI</summary>
@@ -105,19 +104,17 @@ The CLI can still drive ApacheBench / Socket.IO load probes. That is optional an
 Run default HTTP probe:
 
 ```bash
-./bin/loadtest.sh --host localhost --port 8080 --label baseline_eventlet
+./bin/test.sh --host 192.168.1.10 --port 8080 --label baseline_eventlet
 ```
 
 Run with custom targets:
 
 ```bash
-./bin/loadtest.sh \
-  --host localhost \
+./bin/test.sh \
+  --host 192.168.1.10 \
   --port 8080 \
   --concurrency 100 \
   --requests 10000 \
-  --websockets 150 \
-  --duration 20 \
   --target-rps 3000 \
   --target-users 150 \
   --endpoints "/health,/config,/api/users/me" \
@@ -127,8 +124,8 @@ Run with custom targets:
 Run a scenario as a load test (not regression):
 
 ```bash
-./bin/loadtest.sh \
-  --host localhost \
+./bin/test.sh \
+  --host 192.168.1.10 \
   --port 8080 \
   --scenario-file ./examples/scenario.json \
   --scenario-users 30 \
@@ -138,28 +135,6 @@ Run a scenario as a load test (not regression):
 ```
 
 </details>
-
-Run the SBS representative scenario:
-
-```bash
-./bin/loadtest.sh \
-  --host localhost \
-  --port 8080 \
-  --scenario-file ./examples/scenario_sbs_representative.json \
-  --scenario-users 30 \
-  --scenario-duration 60 \
-  --scenario-iterations 0 \
-  --label sbs_representative
-```
-
-This scenario includes a representative mix of SBS operations:
-- platform health/config checks
-- mock login/session bootstrap
-- current user profile retrieval
-- organisation/service/collaboration optimized listings
-- audit log retrieval
-- system statistics lookup
-- chained request using `current_user_id` from `/api/users/me` into `/api/audit_logs/other/{{ vars.current_user_id }}`
 
 Scenario file capabilities:
 - Define ordered API steps (GET/POST/PUT/DELETE)
@@ -260,14 +235,33 @@ Use Insomnia-style placeholders in your step URLs, headers, and bodies:
 | `{{ random.gen_name }}` | configured random generator |
 | `{{ meta.now }}` | current UTC timestamp |
 
-The `server` key in an environment overrides `base_url` for URL construction. All other keys are available as template variables.
+Environment values can also reference other keys in the same environment. Set a host once and reuse it:
+
+```json
+{
+  "environments": {
+    "staging": {
+      "base_url": "https://staging.example.org",
+      "issuer": "{{ base_url }}",
+      "token_url": "{{ base_url }}/oauth/token",
+      "redirect_uri": "{{ base_url }}/callback"
+    }
+  }
+}
+```
+
+`{{ server }}`, `{{ env.base_url }}`, and `{{ _.base_url }}` work the same way. Nested references are expanded (up to 10 passes); `vars.`, `random.`, and `meta.` placeholders are left for step rendering.
+
+If a referenced environment variable has no value, the Run panel lists it and **Run Tests** stays disabled until you fill it in. Those values are kept for the browser session and are not written back to the scenario file.
+
+The `server` key in an environment overrides `base_url` for URL construction. All other keys are available as template variables. After a host is chosen, `server` and `base_url` are both set so either name works in templates.
 
 ### Using a named environment from the CLI
 
 Pass `--scenario-environment` to the shell runner:
 
 ```bash
-./bin/loadtest.sh \
+./bin/test.sh \
   --scenario-file ./examples/SCIM.json \
   --scenario-environment staging \
   --scenario-users 10 \
@@ -277,46 +271,7 @@ Pass `--scenario-environment` to the shell runner:
 
 If `--scenario-environment` is omitted the value of `selected_environment` in the scenario file is used.
 
-### Secrets and SOPS
-
-Do not store bearer tokens directly in scenario files. Use secret references in your environment values:
-
-```json
-{
-  "environments": {
-    "live": {
-      "server": "https://oauth2.live.surfresearchcloud.nl",
-      "token": "${secret:oauth.live.bearer_token}"
-    }
-  }
-}
-```
-
-Supported runtime sources:
-
-- `--secrets-file <path>` when running `bin/loadtest.sh`
-- `scenario_secrets_file` in the web UI run payload (Secrets File field)
-- `LTI_SECRETS_FILE` environment variable (fallback)
-- `LTI_SECRET_<NAME>` environment variables (for direct injection)
-
-Secrets file format:
-
-- JSON or YAML object
-- Optional top-level `secrets` object
-- SOPS-encrypted files are supported when `sops` CLI is installed
-
-Example:
-
-```yaml
-secrets:
-  oauth.live.bearer_token: "Bearer eyJhbGciOi..."
-```
-
-Security behavior:
-
-- Secret references are resolved server-side only during run/test execution.
-- Secret values are never written back into scenario files.
-- Run stdout/stderr returned by the API is redacted for Authorization/Bearer patterns.
+Put sensitive values in the suite environment, or fill them in **Missing environment values** before a run. Run stdout/stderr returned by the API is redacted for Authorization/Bearer patterns.
 
 ### Insomnia import and environments
 
@@ -337,7 +292,7 @@ Use these patterns to model realistic API workflows.
 
 ```json
 {
-  "base_url": "http://localhost:8080",
+  "base_url": "http://192.168.1.10:8080",
   "random_generators": {
     "request_id": { "type": "uuid" },
     "email": { "type": "email", "prefix": "loadtest", "domain": "example.org" }
@@ -451,30 +406,9 @@ Use these patterns to model realistic API workflows.
 - Timestamp placeholder: `{{ meta.now }}`
 
 ## Output
-Each run creates a folder in `results/`:
-- `summary.json` - normalized metrics for automation/comparison
-- `scenario.json` - scenario execution metrics (when scenario mode is used)
-- `report.md` - markdown report
-- `http_rps.png` - throughput chart
-- `http_latency.png` - latency chart
-- `targets_vs_achieved.png` - target comparison chart
-- `scenario_step_latency_p95.png` - scenario step tail latency chart
-- raw `ab` outputs (`*.txt`, `*_percentiles.csv`)
+The web UI keeps only the last run in the page: a pass/fail list. It does not write `results/` folders or markdown reports.
 
-## Compare Two Runs
-For now, compare key values from summaries:
-
-```bash
-jq '.headline' results/<run1>/summary.json
-jq '.headline' results/<run2>/summary.json
-```
-
-You can also diff full summaries:
-
-```bash
-diff -u results/<run1>/summary.json results/<run2>/summary.json
-```
+CLI runs write a folder under `results/` (summary.json and optional ApacheBench output). `--regression` skips ApacheBench.
 
 ## Notes
-- Put local secrets in a `*.local.json` file next to the suite; those files are gitignored.
-- Set `LTI_TARGET_HOST` when scenarios use `localhost` but the server is on another machine.
+- API hosts (`server`, `mock_provider`, `--host`) must be an IP or FQDN. Do not use localhost.

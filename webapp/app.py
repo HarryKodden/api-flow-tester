@@ -4,35 +4,38 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 
 import requests
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi import Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from tools.scenario_runner import (
-    apply_api_key_override,
     apply_save,
     apply_suite_defaults,
     discover_parent_suite,
-    discover_secrets_file,
-    remap_loopback_url,
+    apply_env_overrides,
+    expand_environment_values,
+    finalize_environment_values,
+    missing_environment_dependencies,
     preview_step_request,
-    rewrite_connection_env,
+    require_routable_api_targets,
+    is_forbidden_api_host,
+    ROUTABLE_HOST_HELP,
     run_step,
 )
-from tools.secret_resolver import load_secret_store, mask_sensitive_text, resolve_secret_refs_in_obj
+from tools.oauth_helpers import stop_cimd_metadata_servers
 
 try:
     import yaml
@@ -41,12 +44,23 @@ except Exception:  # pragma: no cover - optional import guarded at runtime
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES_DIR = ROOT / "examples"
-RESULTS_DIR = ROOT / "results"
 BIN_DIR = ROOT / "bin"
-TOOLS_DIR = ROOT / "tools"
 
 EXAMPLES_DIR.mkdir(parents=True, exist_ok=True)
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+NO_STORE_HEADERS = {"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"}
+_BEARER_RE = re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)([^\s\"']+)")
+
+
+def mask_sensitive_text(text: str) -> str:
+    if not text:
+        return text
+    return _BEARER_RE.sub(lambda match: match.group(1) + "***", text)
+
+
+def _json(content: Any, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(content=content, status_code=status_code, headers=NO_STORE_HEADERS)
+
 
 app = FastAPI(title="Regression Tester", version="0.1.0")
 app.add_middleware(
@@ -56,19 +70,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def disable_cache(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=ROOT / "webapp" / "static"), name="static")
-app.mount("/results", StaticFiles(directory=RESULTS_DIR), name="results")
 templates = Jinja2Templates(directory=str(ROOT / "webapp" / "templates"))
 
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {
-        "status": "ok",
-        "rewrite_localhost": (os.environ.get("LTI_REWRITE_LOCALHOST") or "").strip(),
-        "target_host": (os.environ.get("LTI_TARGET_HOST") or "").strip(),
-        "target_port": (os.environ.get("LTI_TARGET_PORT") or "").strip(),
-    }
+    return {"status": "ok"}
 
 
 def _normalize_examples_rel(relative: str, *, allow_empty: bool = False) -> str:
@@ -136,8 +156,6 @@ def _build_examples_tree(directory: Path, relative: str) -> dict[str, Any]:
         if entry.is_dir():
             children.append(_build_examples_tree(entry, child_rel))
         elif entry.suffix.lower() == ".json":
-            if entry.name in {"secrets.local.json", "secrets.local.yaml", "secrets.local.yml"}:
-                continue
             children.append(_scenario_file_node(entry, child_rel))
     return {
         "type": "dir",
@@ -148,12 +166,12 @@ def _build_examples_tree(directory: Path, relative: str) -> dict[str, Any]:
 
 
 @app.get("/api/scenarios")
-def list_scenarios() -> dict[str, Any]:
-    return _build_examples_tree(EXAMPLES_DIR, "")
+def list_scenarios() -> JSONResponse:
+    return _json(_build_examples_tree(EXAMPLES_DIR, ""))
 
 
 @app.get("/api/scenarios/parent-suite")
-def parent_suite(path: str = Query(..., min_length=1)) -> dict[str, Any]:
+def parent_suite(path: str = Query(..., min_length=1)) -> JSONResponse:
     file_path = _resolve_examples_path(path)
     if not file_path.is_file() or file_path.suffix.lower() != ".json":
         raise HTTPException(status_code=404, detail="Scenario not found")
@@ -162,36 +180,38 @@ def parent_suite(path: str = Query(..., min_length=1)) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid scenario JSON: {exc}") from exc
     if not isinstance(scenario, dict):
-        return {"status": "none"}
+        return _json({"status": "none"})
     suite = discover_parent_suite(file_path, scenario)
     if not suite:
-        return {"status": "none"}
+        return _json({"status": "none"})
     suite_name = str(suite.get("_file") or "")
     parent_rel = str(file_path.parent.relative_to(EXAMPLES_DIR)).replace("\\", "/")
     if parent_rel in {"", "."}:
         relative = suite_name
     else:
         relative = f"{parent_rel}/{suite_name}" if suite_name else parent_rel
-    return {
+    return _json({
         "status": "ok",
         "path": relative,
         "name": suite.get("name"),
+        "description": suite.get("description") or "",
         "selected_environment": suite.get("selected_environment") or "",
         "environments": suite.get("environments") if isinstance(suite.get("environments"), dict) else {},
         "random_generators": suite.get("random_generators") if isinstance(suite.get("random_generators"), dict) else {},
         "scenarios": suite.get("scenarios") if isinstance(suite.get("scenarios"), list) else [],
-    }
+    })
 
 
 @app.get("/api/scenarios/file")
-def get_scenario(path: str = Query(..., min_length=1)) -> dict[str, Any]:
+def get_scenario(path: str = Query(..., min_length=1)) -> JSONResponse:
     file_path = _resolve_examples_path(path)
     if not file_path.is_file() or file_path.suffix.lower() != ".json":
         raise HTTPException(status_code=404, detail="Scenario not found")
     try:
-        return json.loads(file_path.read_text(encoding="utf-8"))
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid scenario JSON: {exc}") from exc
+    return _json(payload)
 
 
 @app.post("/api/scenarios/file")
@@ -435,7 +455,7 @@ def _convert_postman_collection(payload: dict[str, Any]) -> dict[str, Any]:
         inferred_base_url = str(env_values.get("baseUrl") or env_values.get("base_url") or env_values.get("server") or "") or None
 
     return {
-        "base_url": inferred_base_url or "http://localhost:8080",
+        "base_url": inferred_base_url or "",
         "random_generators": {},
         "environments": environments,
         "selected_environment": selected_environment,
@@ -581,7 +601,7 @@ def _convert_insomnia_export(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="No request resources found in Insomnia export")
 
     return {
-        "base_url": inferred_base_url or "http://localhost:8080",
+        "base_url": inferred_base_url or "",
         "random_generators": {},
         "steps": steps,
     }
@@ -650,7 +670,7 @@ def _convert_insomnia_v5_collection(payload: dict[str, Any]) -> dict[str, Any]:
         inferred_base_url = _resolve_base_url_from_environment(environments.get(selected_environment))
 
     return {
-        "base_url": inferred_base_url or "http://localhost:8080",
+        "base_url": inferred_base_url or "",
         "random_generators": {},
         "environments": environments,
         "selected_environment": selected_environment,
@@ -676,25 +696,14 @@ def _get_scenario_environment_values(scenario: dict[str, Any], selected_environm
 def _resolve_scenario_environment_values(
     scenario: dict[str, Any],
     selected_environment: str | None = None,
-    secrets_file: str | None = None,
 ) -> dict[str, Any]:
-    values = _get_scenario_environment_values(scenario, selected_environment)
-    try:
-        secret_path = secrets_file or discover_secrets_file(EXAMPLES_DIR / "oauth2-server" / "suite.json", None)
-        secret_store = load_secret_store(secret_path)
-        resolved = resolve_secret_refs_in_obj(values, secret_store, strict=True)
-        if isinstance(resolved, dict):
-            apply_api_key_override(resolved, secret_store)
-            return resolved
-        return resolved
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Failed to resolve environment secrets: {exc}") from exc
+    return _get_scenario_environment_values(scenario, selected_environment)
 
 
 def _get_scenario_base_url(scenario: dict[str, Any], selected_environment: str | None = None) -> str:
     environment_values = _resolve_scenario_environment_values(scenario, selected_environment)
+    if isinstance(environment_values, dict):
+        environment_values = expand_environment_values(environment_values)
     env_url = _resolve_base_url_from_environment(environment_values)
     if env_url:
         return env_url
@@ -703,11 +712,7 @@ def _get_scenario_base_url(scenario: dict[str, Any], selected_environment: str |
     if isinstance(base_url, str) and base_url.strip():
         return base_url.strip()
 
-    return "http://localhost:8080"
-
-
-def _remap_test_base_url(base_url: str) -> str:
-    return remap_loopback_url(base_url)
+    return ""
 
 
 def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
@@ -730,11 +735,27 @@ def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], di
         raise HTTPException(status_code=400, detail="scenario has no steps")
     selected_environment = payload.get("selected_environment") or scenario.get("selected_environment")
     base_url = payload.get("base_url") or _get_scenario_base_url(scenario, selected_environment)
-    base_url = _remap_test_base_url(str(base_url or ""))
+    base_url = str(base_url or "")
     random_generators = scenario.get("random_generators", {})
     environment_values = _resolve_scenario_environment_values(scenario, selected_environment)
+    overrides = payload.get("environment_overrides")
     if isinstance(environment_values, dict):
-        environment_values = rewrite_connection_env(environment_values)
+        if isinstance(overrides, dict):
+            environment_values = apply_env_overrides(environment_values, overrides)
+        environment_values = finalize_environment_values(environment_values, base_url=base_url)
+        missing = missing_environment_dependencies(environment_values, steps)
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Environment variables need a value: {', '.join(missing)}",
+            )
+        env_host = environment_values.get("server") or environment_values.get("base_url")
+        if isinstance(env_host, str) and env_host.strip():
+            base_url = env_host.strip()
+        try:
+            require_routable_api_targets(environment_values, extra_urls=[base_url])
+        except SystemExit as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     context = {"vars": {"worker_id": 1}, "env": environment_values}
     return base_url, context, random_generators if isinstance(random_generators, dict) else {}, steps
 
@@ -857,84 +878,6 @@ async def import_scenario(file: UploadFile = File(...), scenario_name: str | Non
     }
 
 
-@app.get("/api/runs")
-def list_runs() -> list[dict[str, Any]]:
-    runs = []
-    for run_dir in sorted([p for p in RESULTS_DIR.iterdir() if p.is_dir()], reverse=True):
-        summary_path = run_dir / "summary.json"
-        summary = {}
-        if summary_path.exists():
-            try:
-                summary = json.loads(summary_path.read_text(encoding="utf-8"))
-            except Exception:
-                summary = {}
-        runs.append(
-            {
-                "id": run_dir.name,
-                "label": summary.get("label", run_dir.name),
-                "target": summary.get("target"),
-                "timestamp": summary.get("timestamp"),
-                "path": str(run_dir.relative_to(ROOT)),
-            }
-        )
-    return runs
-
-
-@app.get("/api/runs/{run_id}")
-def get_run(run_id: str) -> dict[str, Any]:
-    run_dir = RESULTS_DIR / run_id
-    if not run_dir.exists():
-        raise HTTPException(status_code=404, detail="Run not found")
-    summary = {}
-    report = None
-    summary_path = run_dir / "summary.json"
-    if summary_path.exists():
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    report_path = run_dir / "report.md"
-    if report_path.exists():
-        report = report_path.read_text(encoding="utf-8")
-    return {
-        "summary": summary,
-        "report": report,
-        "artifacts": [
-            {"name": p.name, "url": f"/results/{run_id}/{p.name}"}
-            for p in sorted(run_dir.iterdir()) if p.is_file()
-        ],
-    }
-
-
-def _delete_run(run_id: str) -> dict[str, str]:
-    if "/" in run_id or run_id.startswith("."):
-        raise HTTPException(status_code=400, detail="Invalid run id")
-
-    run_dir = RESULTS_DIR / run_id
-    if not run_dir.exists() or not run_dir.is_dir():
-        raise HTTPException(status_code=404, detail="Run not found")
-
-    shutil.rmtree(run_dir)
-    return {"status": "deleted", "run_id": run_id}
-
-
-@app.post("/api/runs/clear")
-def clear_runs() -> dict[str, Any]:
-    deleted: list[str] = []
-    for run_dir in list(RESULTS_DIR.iterdir()):
-        if run_dir.is_dir() and not run_dir.name.startswith("."):
-            shutil.rmtree(run_dir)
-            deleted.append(run_dir.name)
-    return {"status": "deleted", "count": len(deleted), "run_ids": deleted}
-
-
-@app.delete("/api/runs/{run_id}")
-def delete_run(run_id: str) -> dict[str, str]:
-    return _delete_run(run_id)
-
-
-@app.post("/api/runs/{run_id}/delete")
-def delete_run_post(run_id: str) -> dict[str, str]:
-    return _delete_run(run_id)
-
-
 @app.post("/api/runs")
 def start_run(payload: dict[str, Any]) -> dict[str, Any]:
     scenario_file = payload.get("scenario_file")
@@ -943,38 +886,16 @@ def start_run(payload: dict[str, Any]) -> dict[str, Any]:
 
     label = payload.get("label") or f"web_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     scheme = payload.get("scheme", "http")
-    host = payload.get("host", "localhost")
-    port = str(payload.get("port", 8080))
+    host = str(payload.get("host") or "").strip()
+    port = str(payload.get("port") or "").strip()
+    if host and is_forbidden_api_host(host):
+        raise HTTPException(status_code=400, detail=ROUTABLE_HOST_HELP)
     scenario_users = str(payload.get("scenario_users", 1))
     scenario_duration = str(payload.get("scenario_duration", 60))
     scenario_iterations = str(payload.get("scenario_iterations", 1))
     scenario_environment = str(payload.get("scenario_environment", "") or "")
-    scenario_secrets_file = str(payload.get("scenario_secrets_file", "") or "")
-    if not scenario_secrets_file:
-        scenario_path = Path(scenario_file)
-        if not scenario_path.is_absolute():
-            scenario_path = ROOT / scenario_file
-        discovered = discover_secrets_file(scenario_path, None)
-        if discovered:
-            scenario_secrets_file = discovered
-
-    rewrite_to = (os.environ.get("LTI_REWRITE_LOCALHOST") or "").strip()
-    default_target_host = (os.environ.get("LTI_TARGET_HOST") or "").strip()
-    if str(host).strip() in {"localhost", "127.0.0.1", "::1"} and default_target_host:
-        host = default_target_host
-    elif rewrite_to and str(host).strip() in {"localhost", "127.0.0.1", "::1"}:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This UI rewrites localhost to the Docker host "
-                f"({rewrite_to}), which is not the service under test. "
-                "Set Host to the target IP (same as CLI --host)."
-            ),
-        )
-    target_rps = str(payload.get("target_rps", 500))
-    target_users = str(payload.get("target_users", 100))
     regression = bool(payload.get("regression", True))
-    generate_report = bool(payload.get("generate_report", False))
+    stop_cimd_metadata_servers()
 
     if regression:
         scenario_users = "1"
@@ -984,46 +905,57 @@ def start_run(payload: dict[str, Any]) -> dict[str, Any]:
         if not payload.get("label"):
             label = "regression"
 
-    cmd = [
-        str(BIN_DIR / "loadtest.sh"),
-        "--scheme", str(scheme),
-        "--host", host,
-        "--port", port,
-        "--scenario-file", scenario_file,
-        "--scenario-users", scenario_users,
-        "--scenario-duration", scenario_duration,
-        "--scenario-iterations", scenario_iterations,
-        "--scenario-only",
-        *(["--scenario-environment", scenario_environment] if scenario_environment else []),
-        *(["--secrets-file", scenario_secrets_file] if scenario_secrets_file else []),
-        "--target-rps", target_rps,
-        "--target-users", target_users,
-        "--label", label,
-    ]
-    if regression:
-        cmd.append("--regression")
-    elif not generate_report:
-        cmd.append("--no-report")
+    with tempfile.TemporaryDirectory(prefix="lti-run-") as tmp:
+        tmp_dir = Path(tmp)
+        cmd = [
+            str(BIN_DIR / "test.sh"),
+            "--scheme", str(scheme),
+            "--scenario-file", scenario_file,
+            "--scenario-users", scenario_users,
+            "--scenario-duration", scenario_duration,
+            "--scenario-iterations", scenario_iterations,
+            "--scenario-only",
+            "--output-dir", str(tmp_dir),
+            *(["--host", host] if host else []),
+            *(["--port", port] if port else []),
+            *(["--scenario-environment", scenario_environment] if scenario_environment else []),
+            "--label", label,
+        ]
+        if regression:
+            cmd.append("--regression")
 
-    # Ensure the subprocess inherits the current venv so python3 resolves correctly
-    venv_bin = Path(sys.executable).parent
-    env = os.environ.copy()
-    env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", "")
-    env["VIRTUAL_ENV"] = str(venv_bin.parent)
+        overrides = payload.get("environment_overrides")
+        if isinstance(overrides, dict) and overrides:
+            extra_env_path = tmp_dir / "extra-env.json"
+            extra_env_path.write_text(json.dumps(overrides), encoding="utf-8")
+            cmd.extend(["--scenario-extra-env", str(extra_env_path)])
 
-    proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, env=env)
-    created = sorted([p for p in RESULTS_DIR.iterdir() if p.is_dir()], reverse=True)
-    run_id = created[0].name if created else None
-    has_report = bool(run_id and (RESULTS_DIR / run_id / "summary.json").exists())
-    payload_out = {
-        "status": "completed" if proc.returncode == 0 else "completed_with_errors",
-        "run_id": run_id,
-        "stdout": mask_sensitive_text(proc.stdout),
-        "stderr": mask_sensitive_text(proc.stderr),
-    }
-    if proc.returncode != 0 and not has_report:
-        raise HTTPException(status_code=500, detail=payload_out)
-    return payload_out
+        # Ensure the subprocess inherits the current venv so python3 resolves correctly
+        venv_bin = Path(sys.executable).parent
+        env = os.environ.copy()
+        env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", "")
+        env["VIRTUAL_ENV"] = str(venv_bin.parent)
+
+        proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, env=env)
+        summary: dict[str, Any] = {}
+        summaries = sorted(tmp_dir.glob("*/summary.json"))
+        if summaries:
+            try:
+                loaded = json.loads(summaries[-1].read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    summary = loaded
+            except Exception:
+                summary = {}
+
+        payload_out = {
+            "status": "completed" if proc.returncode == 0 else "completed_with_errors",
+            "summary": summary,
+            "stdout": mask_sensitive_text(proc.stdout),
+            "stderr": mask_sensitive_text(proc.stderr),
+        }
+        if proc.returncode != 0 and not summary:
+            raise HTTPException(status_code=500, detail=payload_out)
+        return payload_out
 
 
 @app.post("/api/test-step")
@@ -1094,6 +1026,8 @@ def test_step(payload: dict[str, Any]) -> dict[str, Any]:
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        stop_cimd_metadata_servers()
 
 
 @app.post("/api/preview-step")
@@ -1122,6 +1056,8 @@ def preview_step(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        stop_cimd_metadata_servers()
 
 
 @app.post("/api/test-sequence")
@@ -1156,8 +1092,21 @@ def test_sequence(payload: dict[str, Any]) -> dict[str, Any]:
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        stop_cimd_metadata_servers()
 
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> Any:
-    return templates.TemplateResponse(request=request, name="index.html", context={})
+    static_dir = ROOT / "webapp" / "static"
+    asset_version = max(
+        int((static_dir / "app.js").stat().st_mtime),
+        int((static_dir / "app.css").stat().st_mtime),
+    )
+    response = templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={"asset_version": asset_version},
+    )
+    response.headers.update(NO_STORE_HEADERS)
+    return response

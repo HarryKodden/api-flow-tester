@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlparse
 
 import requests
 from tools.oauth_helpers import (
@@ -31,11 +31,69 @@ from tools.oauth_helpers import (
     query_param,
     reset_dpop_key,
     start_cimd_metadata_server,
+    stop_cimd_metadata_servers,
 )
-from tools.secret_resolver import load_secret_store, resolve_secret_refs_in_obj
 
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^}]+)\s*\}\}")
-LOCAL_SECRET_NAMES = ("secrets.local.yaml", "secrets.local.yml", "secrets.local.json")
+CONNECTION_ENV_KEYS = {"server", "base_url", "baseUrl", "url", "mock_provider"}
+FORBIDDEN_API_HOSTS = frozenset({
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "0.0.0.0",
+    "host.docker.internal",
+    "ip6-localhost",
+    "ip6-loopback",
+})
+ROUTABLE_HOST_HELP = "API hosts must be an IP or FQDN, not localhost or host.docker.internal"
+
+
+def parse_target_hostname(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = f"http://{text}"
+    host = urlparse(text).hostname or ""
+    return host.strip("[]").lower().rstrip(".")
+
+
+def is_forbidden_api_host(host: str | None) -> bool:
+    name = (host or "").strip().lower().rstrip(".")
+    if name.startswith("[") and name.endswith("]"):
+        name = name[1:-1]
+    if not name:
+        return False
+    if name in FORBIDDEN_API_HOSTS:
+        return True
+    return name.endswith(".localhost")
+
+
+def is_forbidden_api_target(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or "{{" in text:
+        return False
+    return is_forbidden_api_host(parse_target_hostname(text))
+
+
+def forbidden_api_targets(values: dict[str, Any] | None, extra_urls: list[str] | None = None) -> list[str]:
+    found: list[str] = []
+    env = values or {}
+    for key in CONNECTION_ENV_KEYS:
+        if is_forbidden_api_target(env.get(key)):
+            found.append(key)
+    for url in extra_urls or []:
+        if is_forbidden_api_target(url) and "base_url" not in found:
+            found.append("base_url")
+    return found
+
+
+def require_routable_api_targets(values: dict[str, Any] | None, extra_urls: list[str] | None = None) -> None:
+    bad = forbidden_api_targets(values, extra_urls)
+    if bad:
+        raise SystemExit(f"{ROUTABLE_HOST_HELP}: {', '.join(bad)}")
 
 
 def now_iso() -> str:
@@ -143,12 +201,13 @@ def resolve_base_url(scenario: dict[str, Any], selected_environment: str | None)
         first_value = next(iter(environments.values()))
         if isinstance(first_value, dict):
             env_values = first_value
+    env_values = expand_environment_values(dict(env_values), keys=CONNECTION_ENV_KEYS)
     for key in ("server", "base_url", "baseUrl", "url"):
         value = env_values.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    base_url = scenario.get("base_url", "http://localhost:8080")
-    return str(base_url).strip() or "http://localhost:8080"
+    base_url = scenario.get("base_url", "")
+    return str(base_url).strip()
 
 
 def resolve_environment_values(scenario: dict[str, Any], selected_environment: str | None) -> dict[str, Any]:
@@ -162,31 +221,215 @@ def resolve_environment_values(scenario: dict[str, Any], selected_environment: s
     return {}
 
 
-def discover_secrets_file(scenario_path: Path, explicit: str | None) -> str | None:
-    if explicit:
-        return explicit
-    seen: set[Path] = set()
-    for folder in (scenario_path.parent, Path.cwd()):
-        folder = folder.resolve()
-        if folder in seen:
+def _environment_ref_path(token: str) -> str | None:
+    token = token.strip()
+    if token.startswith(("vars.", "random.", "meta.")):
+        return None
+    if token.startswith("env."):
+        return token[4:]
+    if token.startswith("_."):
+        return token[2:]
+    return token
+
+
+def _value_has_env_placeholders(value: str) -> bool:
+    return any(_environment_ref_path(raw) is not None for raw in PLACEHOLDER_RE.findall(value))
+
+
+def expand_environment_values(
+    values: dict[str, Any],
+    *,
+    keys: set[str] | None = None,
+) -> dict[str, Any]:
+    """Expand {{ name }} placeholders that refer to other keys in the same environment."""
+    if not isinstance(values, dict):
+        return {}
+    current: Any = dict(values)
+
+    def lookup(path: str) -> Any:
+        found = path_get(current, path, None)
+        if found is None and path in current:
+            return current[path]
+        return found
+
+    def expand_str(value: str) -> str:
+        def repl(match: re.Match[str]) -> str:
+            path = _environment_ref_path(match.group(1))
+            if path is None:
+                return match.group(0)
+            resolved = lookup(path)
+            if resolved is None or isinstance(resolved, (dict, list)):
+                return match.group(0)
+            text = "" if resolved is None else str(resolved)
+            if _value_has_env_placeholders(text):
+                return match.group(0)
+            return text
+
+        return PLACEHOLDER_RE.sub(repl, value)
+
+    def walk(obj: Any) -> Any:
+        if isinstance(obj, str):
+            return expand_str(obj)
+        if isinstance(obj, dict):
+            return {k: walk(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [walk(v) for v in obj]
+        return obj
+
+    for _ in range(10):
+        if keys is None:
+            nxt = walk(current)
+        else:
+            nxt = dict(current)
+            for key in keys:
+                if key in nxt:
+                    nxt[key] = walk(nxt[key])
+        if nxt == current:
+            break
+        current = nxt
+    return current if isinstance(current, dict) else dict(values)
+
+
+def finalize_environment_values(
+    values: dict[str, Any] | None,
+    *,
+    base_url: str | None = None,
+) -> dict[str, Any]:
+    """Expand intra-environment placeholders and encoded companion keys."""
+    prepared = dict(values or {})
+    prepared = expand_environment_values(prepared, keys=CONNECTION_ENV_KEYS)
+    resolved = (base_url or "").strip()
+    if resolved and is_forbidden_api_target(resolved):
+        resolved = ""
+    if not resolved:
+        for key in ("server", "base_url", "baseUrl", "url"):
+            value = prepared.get(key)
+            if isinstance(value, str) and value.strip():
+                resolved = value.strip()
+                break
+    if resolved:
+        prepared["server"] = resolved
+        prepared.setdefault("base_url", resolved)
+    return apply_encoded_companions(expand_environment_values(prepared))
+
+
+def apply_encoded_companions(values: dict[str, Any]) -> dict[str, Any]:
+    """Set foo_encoded to the URL-encoded form of foo after placeholders expand."""
+    applied = dict(values)
+    for key, value in list(applied.items()):
+        if key.endswith("_encoded") or not isinstance(value, str):
             continue
-        seen.add(folder)
-        for name in LOCAL_SECRET_NAMES:
-            candidate = folder / name
-            if candidate.is_file():
-                return str(candidate)
-    return None
+        encoded_key = f"{key}_encoded"
+        if encoded_key not in applied:
+            continue
+        if not value.strip() or _value_has_env_placeholders(value):
+            continue
+        applied[encoded_key] = quote(value, safe="")
+    return applied
 
 
-def apply_api_key_override(environment_values: dict[str, Any], secret_store: dict[str, Any]) -> None:
-    for key in ("api_key", "oauth2_api_key"):
-        value = secret_store.get(key)
-        if isinstance(value, str) and value.strip():
-            environment_values["api_key"] = value.strip()
-            return
-    env_value = os.environ.get("API_KEY") or os.environ.get("LTI_SECRET_API_KEY")
-    if env_value:
-        environment_values["api_key"] = env_value
+def collect_environment_refs(value: Any, found: set[str] | None = None) -> set[str]:
+    refs = found if found is not None else set()
+    if isinstance(value, str):
+        for raw in PLACEHOLDER_RE.findall(value):
+            path = _environment_ref_path(raw)
+            if path:
+                refs.add(path)
+    elif isinstance(value, dict):
+        for item in value.values():
+            collect_environment_refs(item, refs)
+    elif isinstance(value, list):
+        for item in value:
+            collect_environment_refs(item, refs)
+    return refs
+
+
+def _is_concrete_env_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        text = value.strip()
+        return bool(text) and not _value_has_env_placeholders(text)
+    if isinstance(value, (dict, list)):
+        return len(value) > 0
+    return True
+
+
+def apply_env_overrides(values: dict[str, Any] | None, overrides: dict[str, Any] | None) -> dict[str, Any]:
+    applied = dict(values or {})
+    for key, value in (overrides or {}).items():
+        if not _is_set(value):
+            continue
+        name = str(key).strip()
+        if not name:
+            continue
+        if "." in name:
+            cursor: dict[str, Any] = applied
+            parts = name.split(".")
+            for part in parts[:-1]:
+                next_value = cursor.get(part)
+                if not isinstance(next_value, dict):
+                    next_value = {}
+                    cursor[part] = next_value
+                cursor = next_value
+            cursor[parts[-1]] = value
+        else:
+            applied[name] = value
+    return applied
+
+
+SKIP_EXPORTED_VARS = {"worker_id", "exec_error"}
+
+
+def exported_context_vars(vars_map: dict[str, Any] | None, names: Any) -> dict[str, Any]:
+    """Promote selected scenario vars into suite env for later members."""
+    source = vars_map if isinstance(vars_map, dict) else {}
+    if names is True:
+        keys = [str(key) for key in source if str(key) not in SKIP_EXPORTED_VARS]
+    elif isinstance(names, list):
+        keys = [str(key).strip() for key in names if str(key).strip()]
+    else:
+        return {}
+    exported: dict[str, Any] = {}
+    for key in keys:
+        value = source.get(key)
+        if _is_set(value):
+            exported[key] = value
+    return exported
+
+
+def render_expectation_step(
+    step: dict[str, Any],
+    context: dict[str, Any],
+    random_generators: dict[str, Any],
+) -> dict[str, Any]:
+    rendered = dict(step)
+    for key in ("expected_json_contains", "expected_body_contains", "expected_body_not_contains"):
+        if key in rendered:
+            rendered[key] = render_template(rendered[key], context, random_generators)
+    return rendered
+
+
+def missing_environment_dependencies(*sources: Any) -> list[str]:
+    refs: set[str] = set()
+    values = sources[0] if sources and isinstance(sources[0], dict) else {}
+    for source in sources:
+        collect_environment_refs(source, refs)
+    missing: list[str] = []
+    has_host = any(
+        _is_concrete_env_value(values.get(key)) and not is_forbidden_api_target(values.get(key))
+        for key in CONNECTION_ENV_KEYS
+    )
+    for path in sorted(refs):
+        resolved = path_get(values, path, None)
+        if resolved is None and path in values:
+            resolved = values[path]
+        if _is_concrete_env_value(resolved):
+            continue
+        if path in CONNECTION_ENV_KEYS and has_host:
+            continue
+        missing.append(path)
+    return missing
 
 
 def render_template(value: Any, context: dict[str, Any], random_generators: dict[str, Any]) -> Any:
@@ -334,8 +577,11 @@ def run_prepare(action: dict[str, Any], context: dict[str, Any], random_generato
 
     if kind == "cimd_metadata":
         port = int(action.get("port", 8099))
+        advertise_host = parse_target_hostname(base_url)
+        if not advertise_host or is_forbidden_api_host(advertise_host):
+            advertise_host = "127.0.0.1"
         metadata = action.get("metadata") or {
-            "client_id": f"http://127.0.0.1:{port}/client.json",
+            "client_id": f"http://{advertise_host}:{port}/client.json",
             "client_name": "CIMD Loadtest Client",
             "redirect_uris": [f"{base_url}/callback"],
             "grant_types": ["authorization_code"],
@@ -343,7 +589,7 @@ def run_prepare(action: dict[str, Any], context: dict[str, Any], random_generato
             "token_endpoint_auth_method": "none",
             "scope": "openid profile email",
         }
-        url = start_cimd_metadata_server(port, metadata)
+        url = start_cimd_metadata_server(port, metadata, advertise_host=advertise_host)
         context["vars"][action.get("save_url", "cimd_client_id")] = url
         return
 
@@ -479,19 +725,20 @@ def smart_follow(
             latency_ms = (time.perf_counter() - started) * 1000
             return last_response, current_url, latency_ms
 
-        next_url = maybe_rewrite_localhost(absolute_url(current_url, location))
+        next_url = absolute_url(current_url, location)
         host = urlparse(next_url).hostname or ""
         path = urlparse(next_url).path or ""
         has_auth_code = bool(query_param(next_url, "code"))
         is_client_callback = any(host == h or host.endswith(h) for h in stop_hosts if h)
-        # After LTI_REWRITE_LOCALHOST, AS/mock hops use host.docker.internal; still treat
-        # bare localhost/127.0.0.1 callback paths as the client stop condition.
         is_callback_path = path in {"/callback", "/oauth/callback"} or path.endswith("/callback")
         if is_client_callback or has_auth_code or (is_callback_path and host in {"localhost", "127.0.0.1"}):
             # Synthetic response representing the client-callback redirect
             latency_ms = (time.perf_counter() - started) * 1000
             last_response.headers["X-Final-Location"] = next_url
             return last_response, next_url, latency_ms
+
+        if is_forbidden_api_host(host):
+            raise ValueError(f"{ROUTABLE_HOST_HELP}: redirect {next_url}")
 
         current_url = next_url
         current_method = "GET" if last_response.status_code in (302, 303) else current_method
@@ -629,11 +876,13 @@ def run_http_step(
     payload_json = request["json"]
     payload_data = request["data"]
     timeout = float(step.get("timeout", 15))
+    if is_forbidden_api_target(url):
+        return False, False, 0.0, {"error": ROUTABLE_HOST_HELP, "url": url}, None, url, ROUTABLE_HOST_HELP
 
     follow = step.get("follow_redirects", False)
     max_redirects = int(step.get("max_redirects", 10))
-    # Default: only stop on 127.0.0.1 client callbacks. Do NOT include "localhost" —
-    # AS and mock upstream often run on localhost and must be followed.
+    # Stop smart-redirects on 127.0.0.1 client callbacks only. API hops must
+    # use an IP or FQDN; localhost is rejected below.
     stop_hosts = step.get("stop_redirect_hosts") or ["127.0.0.1"]
     if isinstance(stop_hosts, str):
         stop_hosts = [stop_hosts]
@@ -643,17 +892,20 @@ def run_http_step(
     latency_ms = 0.0
 
     if follow in (True, "smart", "manual"):
-        response, final_url, latency_ms = smart_follow(
-            session=session,
-            method=method,
-            url=url,
-            headers=headers,
-            payload_json=payload_json,
-            payload_data=payload_data,
-            timeout=timeout,
-            max_redirects=max_redirects,
-            stop_hosts=list(stop_hosts),
-        )
+        try:
+            response, final_url, latency_ms = smart_follow(
+                session=session,
+                method=method,
+                url=url,
+                headers=headers,
+                payload_json=payload_json,
+                payload_data=payload_data,
+                timeout=timeout,
+                max_redirects=max_redirects,
+                stop_hosts=list(stop_hosts),
+            )
+        except ValueError as exc:
+            return False, False, 0.0, {"error": str(exc)}, None, url, str(exc)
     else:
         started = time.perf_counter()
         try:
@@ -683,7 +935,12 @@ def run_http_step(
     except Exception:
         response_json = None
 
-    success = evaluate_expectations(step, response, response_json, body_text)
+    success = evaluate_expectations(
+        render_expectation_step(step, context, random_generators),
+        response,
+        response_json,
+        body_text,
+    )
     return success, (not success), latency_ms, response_json, response, final_url, body_text
 
 
@@ -697,7 +954,7 @@ def run_poll_step(
     poll = step.get("poll") or {}
     interval = float(poll.get("interval_seconds", 1))
     max_attempts = int(poll.get("max_attempts", 30))
-    until_json = poll.get("until_json_contains")
+    until_json = render_template(poll.get("until_json_contains"), context, random_generators)
     until_not_error = poll.get("until_not_error")  # e.g. authorization_pending
     total_latency = 0.0
     last: tuple[bool, bool, float, Any, requests.Response | None, str | None, str] | None = None
@@ -951,14 +1208,23 @@ def run_worker(
     aggregate: dict[str, StepStats],
     lock: threading.Lock,
     fail_fast: bool,
+    exported_vars: dict[str, Any] | None = None,
 ) -> None:
     session = requests.Session()
     context = {"vars": {"worker_id": worker_id}, "env": dict(environment_values)}
+
+    def capture_vars() -> None:
+        if exported_vars is None:
+            return
+        with lock:
+            exported_vars.clear()
+            exported_vars.update(context.get("vars") or {})
 
     iterations = 0
     while time.time() < run_until and (max_iterations <= 0 or iterations < max_iterations):
         for step in steps:
             if time.time() >= run_until:
+                capture_vars()
                 return
             success, expected_mismatch, latency_ms, _response_json, _response = run_step(
                 session=session,
@@ -1003,49 +1269,11 @@ def run_worker(
                 if sof is False:
                     pass
                 elif sof or fail_fast:
+                    capture_vars()
                     return
         iterations += 1
-
-
-CONNECTION_ENV_KEYS = {"server", "base_url", "baseUrl", "url", "mock_provider"}
-
-
-# Only loopback names. LAN IPs (e.g. a Lima guest at 192.168.64.3) are the
-# real authorization server and must not be rewritten to host.docker.internal.
-_REWRITE_SOURCE_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-
-
-def maybe_rewrite_localhost(url: str) -> str:
-    host = (os.environ.get("LTI_REWRITE_LOCALHOST") or "").strip()
-    if not host or not url:
-        return url
-    parsed = urlparse(url)
-    if parsed.hostname not in _REWRITE_SOURCE_HOSTS:
-        return url
-    netloc = f"{host}:{parsed.port}" if parsed.port else host
-    return urlunparse(parsed._replace(netloc=netloc))
-
-
-def remap_loopback_url(url: str) -> str:
-    raw = str(url or "").strip()
-    if not raw:
-        return raw
-    default_host = (os.environ.get("LTI_TARGET_HOST") or "").strip()
-    parsed = urlparse(raw)
-    host = parsed.hostname or ""
-    if default_host and host in _REWRITE_SOURCE_HOSTS:
-        netloc = f"{default_host}:{parsed.port}" if parsed.port else default_host
-        return urlunparse(parsed._replace(netloc=netloc))
-    return maybe_rewrite_localhost(raw)
-
-
-def rewrite_connection_env(environment_values: dict[str, Any]) -> dict[str, Any]:
-    rewritten = dict(environment_values)
-    for key in CONNECTION_ENV_KEYS:
-        value = rewritten.get(key)
-        if isinstance(value, str):
-            rewritten[key] = remap_loopback_url(value)
-    return rewritten
+        capture_vars()
+    capture_vars()
 
 
 def is_suite(scenario: dict[str, Any]) -> bool:
@@ -1125,12 +1353,20 @@ def discover_parent_suite(scenario_path: Path, scenario: dict[str, Any] | None =
             continue
         selected = str(data.get("selected_environment") or "").strip()
         env_rank = 0 if wanted_env and selected == wanted_env else 1
-        candidates.append(((env_rank, len(members), path.name), data))
+        envs = data.get("environments") if isinstance(data.get("environments"), dict) else {}
+        env_block = envs.get(selected) or envs.get(wanted_env) or {}
+        defined_env = (
+            sum(1 for value in env_block.values() if _is_set(value))
+            if isinstance(env_block, dict)
+            else 0
+        )
+        # Prefer suites that already supply credentials over provision-only suites.
+        candidates.append(((-defined_env, env_rank, len(members), path.name), data))
     if not candidates:
         return None
     candidates.sort(key=lambda item: item[0])
     data = dict(candidates[0][1])
-    data["_file"] = str(candidates[0][0][2])
+    data["_file"] = str(candidates[0][0][3])
     return data
 
 
@@ -1157,16 +1393,13 @@ def execute_scenario(
     *,
     base_url_override: str | None,
     environment: str | None,
-    secret_store: dict[str, Any],
     users: int,
     duration: int,
     iterations: int,
     fail_fast: bool,
     extra_env: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    base_url = base_url_override or resolve_base_url(scenario, environment)
-    base_url = str(resolve_secret_refs_in_obj(base_url, secret_store, strict=True)).strip()
-    base_url = maybe_rewrite_localhost(base_url)
+    base_url = (base_url_override or resolve_base_url(scenario, environment) or "").strip()
     steps = scenario.get("steps", [])
     if not steps:
         raise SystemExit("Scenario has no steps")
@@ -1174,21 +1407,25 @@ def execute_scenario(
     random_generators = scenario.get("random_generators", {})
     environment_values = resolve_environment_values(scenario, environment)
     if extra_env:
-        environment_values.update(extra_env)
-    environment_values = resolve_secret_refs_in_obj(environment_values, secret_store, strict=True)
+        environment_values = apply_env_overrides(environment_values, extra_env)
     if isinstance(environment_values, dict):
-        environment_values = rewrite_connection_env(environment_values)
-        environment_values["server"] = base_url
-        apply_api_key_override(environment_values, secret_store)
+        environment_values = finalize_environment_values(environment_values, base_url=base_url)
+        missing = missing_environment_dependencies(environment_values, steps)
+        if missing:
+            raise SystemExit(f"Environment variables need a value: {', '.join(missing)}")
+        env_host = environment_values.get("server") or environment_values.get("base_url")
+        if isinstance(env_host, str) and env_host.strip():
+            base_url = env_host.strip()
+        require_routable_api_targets(environment_values, extra_urls=[base_url])
 
     environment_values.setdefault(
         "oauth2_server_root",
         os.environ.get("OAUTH2_SERVER_ROOT", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "oauth2-server"))),
     )
-    environment_values.setdefault("loadtester_root", os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
     lock = threading.Lock()
     aggregate: dict[str, StepStats] = {}
+    captured_vars: dict[str, Any] = {}
     started = time.time()
     run_until = started + max(duration, 1)
     worker_fail_fast = fail_fast or bool(scenario.get("fail_fast", False))
@@ -1207,6 +1444,7 @@ def execute_scenario(
                 "aggregate": aggregate,
                 "lock": lock,
                 "fail_fast": worker_fail_fast,
+                "exported_vars": captured_vars,
             },
             daemon=True,
         )
@@ -1242,6 +1480,7 @@ def execute_scenario(
             "rps": total_count / elapsed if elapsed > 0 else 0,
             "success_rate": (total_success / total_count) if total_count else 0,
         },
+        "vars": dict(captured_vars),
     }
 
 
@@ -1253,7 +1492,7 @@ def main() -> int:
     parser.add_argument("--duration", type=int, default=30)
     parser.add_argument("--iterations", type=int, default=0, help="per worker, 0 means unlimited until duration")
     parser.add_argument("--environment", default=None)
-    parser.add_argument("--secrets-file", default=None)
+    parser.add_argument("--extra-env-file", default=None, help="JSON object of environment overrides")
     parser.add_argument("--output", required=True)
     parser.add_argument("--fail-fast", action="store_true", help="stop a worker after first failed step")
     parser.add_argument("--strict", action="store_true", help="exit non-zero if any step failure/mismatch occurred")
@@ -1263,7 +1502,14 @@ def main() -> int:
     with scenario_path.open("r", encoding="utf-8") as fh:
         scenario = json.load(fh)
 
-    secret_store = load_secret_store(discover_secrets_file(scenario_path, args.secrets_file))
+    extra_env: dict[str, Any] = {}
+    if args.extra_env_file:
+        extra_path = Path(args.extra_env_file)
+        loaded = json.loads(extra_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise SystemExit("--extra-env-file must contain a JSON object")
+        extra_env.update(loaded)
+
     suite_mode = is_suite(scenario)
     parent_suite = None if suite_mode else discover_parent_suite(scenario_path, scenario)
     members = load_suite_members(scenario_path, scenario) if suite_mode else [(scenario_path.name, scenario)]
@@ -1274,27 +1520,55 @@ def main() -> int:
         duration = 120
     started = time.time()
     child_results: list[dict[str, Any]] = []
+    skip_remaining = ""
     for name, child in members:
+        if skip_remaining:
+            child_results.append(
+                {
+                    "file": name,
+                    "name": child.get("name", Path(name).stem),
+                    "base_url": args.base_url,
+                    "environment": args.environment,
+                    "users": users,
+                    "duration_s": 0,
+                    "iterations_per_user": iterations,
+                    "steps": [],
+                    "totals": {
+                        "requests": 0,
+                        "success": 0,
+                        "failure": 1,
+                        "expected_mismatch": 0,
+                        "rps": 0,
+                        "success_rate": 0,
+                    },
+                }
+            )
+            print(f"FAIL {name}: skipped ({skip_remaining})")
+            continue
         parent = scenario if suite_mode else parent_suite
         prepared = apply_suite_defaults(child, parent) if parent else child
         result = execute_scenario(
             prepared,
             base_url_override=args.base_url,
             environment=args.environment,
-            secret_store=secret_store,
             users=users,
             duration=duration,
             iterations=iterations,
             fail_fast=True if suite_mode else args.fail_fast,
+            extra_env=extra_env or None,
         )
         result["file"] = name
         result["name"] = child.get("name", Path(name).stem)
         child_results.append(result)
+        exported = exported_context_vars(result.get("vars"), child.get("export_env"))
+        extra_env.update(exported)
         totals = result.get("totals", {})
         status = "PASS" if totals.get("failure", 0) == 0 and totals.get("expected_mismatch", 0) == 0 and totals.get("success", 0) > 0 else "FAIL"
         failed_steps = [step for step in result.get("steps", []) if step.get("failure")]
         extra = f"  {failed_steps[0].get('last_error')}" if failed_steps and failed_steps[0].get("last_error") else ""
         print(f"{status} {name}: {totals.get('success', 0)}/{totals.get('requests', 0)}{extra}")
+        if suite_mode and child.get("export_env") and status == "FAIL":
+            skip_remaining = f"{name} failed"
 
     elapsed = max(time.time() - started, 0.001)
     if suite_mode:

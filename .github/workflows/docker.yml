@@ -1,0 +1,40 @@
+name: Docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: api-flow-tester:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          docker run -d --name api-flow-tester -p 9011:9011 api-flow-tester:ci
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:9011/api/health; then
+              echo
+              docker stop api-flow-tester
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs api-flow-tester
+          docker stop api-flow-tester || true
+          exit 1

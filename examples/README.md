@@ -12,6 +12,7 @@ Translated copies of all `tests/test_*.sh` scripts into [loadtester](../../loadt
 | `suite-proxy.json` | Proxy AS + mock upstream |
 | `suite-proxy-dpop.json` | Proxy AS with DPoP required |
 | `suite-cimd.json` | Local AS with CIMD |
+| `suite-register.json` | Registers clients first, then runs local tests with collected `client_id` / `client_secret` |
 | `suite.json` | All 37 (not expected to pass on one server) |
 | `README.md` | This file |
 
@@ -23,7 +24,7 @@ From the loadtester repo:
 
 ```bash
 cd ../loadtester
-./bin/loadtest.sh \
+./bin/test.sh \
   --scenario-file ./examples/oauth2-server/test_introspection.json \
   --scenario-environment local \
   --regression \
@@ -42,8 +43,8 @@ Useful filters from `suite.json`:
 
 Each scenario embeds:
 
-- `local` — `http://localhost:8080` + preconfigured Basic auth headers / API key / PKCE pair
-- `proxy` — same base URL; assumes upstream mock at `http://localhost:9999` (started separately)
+- `local` — AS on port 8080; set `server` to an IP or FQDN (not localhost)
+- `proxy` — proxy AS on port 8090 and mock upstream on 9999; set `server` and `mock_provider` to IPs or FQDNs
 
 Optional stubs in env (replace before expecting success):
 

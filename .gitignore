@@ -10,11 +10,7 @@ __pycache__/
 results/*
 !results/.gitkeep
 
-# Secrets
-secrets.enc.yaml
-secrets.local.yaml
-secrets.local.yml
-secrets.local.json
+# Local overrides
 **/*.local.yaml
 **/*.local.yml
 **/*.local.json

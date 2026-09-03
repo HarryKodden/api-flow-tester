@@ -3,20 +3,14 @@ services:
     build: .
     ports:
       - "9011:9011"
+      - "8099:8099"
     volumes:
       - ./webapp:/app/webapp
       - ./tools:/app/tools
       - ./bin:/app/bin
       - ./examples:/app/examples
-      - ./results:/app/results
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       PYTHONPATH: /app
-      # Rewrite scenario localhost/127.0.0.1 only. LAN IPs stay as-is.
-      LTI_REWRITE_LOCALHOST: host.docker.internal
-      # Optional: default host when a scenario says localhost
-      # LTI_TARGET_HOST: 192.168.64.3
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:9011/api/health"]
       interval: 15s
