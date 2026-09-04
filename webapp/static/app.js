@@ -9,6 +9,7 @@ const collectionSection = document.getElementById('collection-section');
 const scenarioSection = document.getElementById('scenario-section');
 const saveCollectionButton = document.getElementById('save-collection');
 const copyCollectionButton = document.getElementById('copy-collection');
+const shareCollectionButton = document.getElementById('share-collection');
 const deleteCollectionButton = document.getElementById('delete-collection');
 const importCollectionButton = document.getElementById('import-collection');
 const importCollectionFileInput = document.getElementById('import-collection-file');
@@ -82,6 +83,7 @@ let selectedFolderPath = '';
 let activeCollectionPath = '';
 let activeCollectionMembers = [];
 let activeCollectionDocument = null;
+let currentAccess = null;
 let collectionMemberDocs = new Map();
 let collectionMemberDocsCollection = '';
 let collectionMemberDocsLoading = null;
@@ -108,6 +110,41 @@ let askDialogValue = '';
 
 function isWorkspacePath(path) {
   return String(path || '').replaceAll('\\', '/').replace(/^\.\//, '').startsWith('workspace/');
+}
+
+function canEditActiveCollection() {
+  const permission = currentAccess?.permission || findTreeNode(activeCollectionPath)?.permission || 'owner';
+  return permission === 'owner' || permission === 'edit';
+}
+
+function isOwnerOfActiveCollection() {
+  const permission = currentAccess?.permission || findTreeNode(activeCollectionPath)?.permission || 'owner';
+  return permission === 'owner';
+}
+
+function applyDocumentAccess(document) {
+  if (!document || typeof document !== 'object') {
+    currentAccess = null;
+    return document;
+  }
+  if (document._access && typeof document._access === 'object') {
+    currentAccess = document._access;
+  } else if (isWorkspacePath(selectedScenarioName || activeCollectionPath)) {
+    const node = findTreeNode(activeCollectionPath || selectedScenarioName);
+    if (node?.permission) {
+      currentAccess = {
+        permission: node.permission,
+        owner_id: node.owner_id || '',
+        owner_name: node.owner_name || '',
+        source_collection_id: node.source_collection_id || '',
+      };
+    }
+  } else {
+    currentAccess = null;
+  }
+  const cleaned = {...document};
+  delete cleaned._access;
+  return cleaned;
 }
 
 function isWorkspaceFolderPath(path) {
@@ -204,6 +241,10 @@ function expandFolderPath(folderPath) {
   if (!folderPath) {
     return;
   }
+  if (folderPath === 'shared') {
+    expandedFolders.add('shared');
+    return;
+  }
   if (isWorkspaceFolderPath(folderPath) || String(folderPath).startsWith('ws-folder/')) {
     expandedFolders.add('workspace');
   }
@@ -292,6 +333,9 @@ function collectCollectionNodes(nodes = scenarioTree?.children, into = []) {
 function folderPathForCollection(node) {
   if (!node) {
     return 'workspace';
+  }
+  if (node.source === 'shared') {
+    return 'shared';
   }
   if (isWorkspacePath(node.path)) {
     return node.folder ? `ws-folder/${node.folder}` : 'workspace';
@@ -480,8 +524,15 @@ function renderTreeNodes(container, nodes, depth, parentPath) {
       const label = document.createElement('span');
       label.className = 'tree-label';
       label.textContent = node.name;
-
-      row.append(chevron, icon, label, moreButton(target));
+      if (node.source === 'shared') {
+        row.classList.add('is-shared');
+        const badge = document.createElement('span');
+        badge.className = 'tree-badge';
+        badge.textContent = 'Shared';
+        row.append(chevron, icon, label, badge, moreButton(target));
+      } else {
+        row.append(chevron, icon, label, moreButton(target));
+      }
       row.addEventListener('click', () => {
         selectedFolderPath = node.path;
         expandedFolders.add(node.path);
@@ -511,12 +562,18 @@ function renderTreeNodes(container, nodes, depth, parentPath) {
       parent,
       source: node.source || (isWorkspacePath(node.path) ? 'workspace' : 'library'),
       folder: node.folder || '',
-      draggable: isWorkspacePath(node.path),
+      permission: node.permission || (node.source === 'shared' ? 'read' : 'owner'),
+      owner_name: node.owner_name || '',
+      owner_id: node.owner_id || '',
+      source_collection_id: node.source_collection_id || '',
+      draggable: node.source === 'workspace' && isWorkspacePath(node.path),
     };
     const row = document.createElement('div');
     row.className = `tree-row kind-collection${selected ? ' selected' : ''}`;
     row.style.paddingLeft = `${8 + depth * 14}px`;
-    row.title = node.path;
+    row.title = node.source === 'shared' && node.owner_name
+      ? `${node.path} · shared by ${node.owner_name}`
+      : node.path;
 
     const chevron = document.createElement('button');
     chevron.type = 'button';
@@ -542,11 +599,16 @@ function renderTreeNodes(container, nodes, depth, parentPath) {
 
     const kind = document.createElement('span');
     kind.className = 'tree-kind';
-    kind.textContent = 'Collection';
+    kind.textContent = node.source === 'shared' ? 'Shared' : 'Collection';
 
     const label = document.createElement('span');
     label.className = 'tree-label';
-    label.textContent = node.name;
+    label.textContent = node.source === 'shared' && node.owner_name
+      ? `${node.name} · ${node.owner_name}`
+      : node.name;
+    if (node.source === 'shared') {
+      row.classList.add('is-shared');
+    }
 
     const meta = document.createElement('span');
     meta.className = 'tree-meta';
@@ -577,7 +639,8 @@ function renderTreeNodes(container, nodes, depth, parentPath) {
         name: memberName,
         parent: node.path,
         source: target.source,
-        draggable: isWorkspacePath(node.path),
+        permission: target.permission,
+        draggable: target.source === 'workspace' && isWorkspacePath(memberPath),
       };
       const memberRow = document.createElement('div');
       memberRow.className = `tree-row kind-scenario${memberPath === selectedScenarioName ? ' selected' : ''}`;
@@ -2520,6 +2583,8 @@ async function loadScenarios() {
     collectFolderPaths(scenarioTree.children).forEach((path) => expandedFolders.add(path));
     didExpandAllFolders = true;
   }
+  expandedFolders.add('workspace');
+  expandedFolders.add('shared');
   renderExplorer();
   let openPath = selectedScenarioName;
   let collectionPath = activeCollectionPath;
@@ -2620,28 +2685,43 @@ function renderHierarchy() {
   }
   const collectionPath = activeCollectionPath || (viewingCollection ? selectedScenarioName : '');
   const workspaceCollectionOpen = Boolean(collectionPath) && isWorkspacePath(collectionPath) && authState.authenticated;
+  const editable = !workspaceCollectionOpen || canEditActiveCollection();
+  const owned = !workspaceCollectionOpen || isOwnerOfActiveCollection();
   if (importCollectionButton) {
-    importCollectionButton.classList.toggle('hidden', !workspaceCollectionOpen);
+    importCollectionButton.classList.toggle('hidden', !workspaceCollectionOpen || !editable);
   }
   if (exportCollectionBrunoButton) {
     exportCollectionBrunoButton.classList.toggle('hidden', !collectionPath || !authState.authenticated);
   }
+  if (shareCollectionButton) {
+    shareCollectionButton.classList.toggle(
+      'hidden',
+      !workspaceCollectionOpen || !owned || findTreeNode(collectionPath)?.source === 'shared',
+    );
+  }
   if (deleteCollectionButton) {
-    deleteCollectionButton.classList.toggle('hidden', !collectionPath || !authState.authenticated || !isWorkspacePath(collectionPath));
+    deleteCollectionButton.classList.toggle('hidden', !collectionPath || !authState.authenticated || !isWorkspacePath(collectionPath) || !owned);
   }
   if (deleteScenarioButton) {
     const scenarioPath = selectedScenarioName || '';
-    const showScenarioDelete = Boolean(scenarioPath) && !viewingCollection && authState.authenticated;
+    const showScenarioDelete = Boolean(scenarioPath) && !viewingCollection && authState.authenticated && editable;
     deleteScenarioButton.classList.toggle('hidden', !showScenarioDelete);
+  }
+  if (saveCollectionButton) {
+    saveCollectionButton.disabled = workspaceCollectionOpen && !editable;
+    saveCollectionButton.title = workspaceCollectionOpen && !editable ? 'This shared collection is read-only' : '';
   }
   if (runTitle) {
     runTitle.textContent = 'Run';
   }
   if (saveScenarioButton) {
     saveScenarioButton.textContent = 'Save Scenario';
+    saveScenarioButton.disabled = workspaceCollectionOpen && !editable;
+    saveScenarioButton.title = workspaceCollectionOpen && !editable ? 'This shared collection is read-only' : '';
   }
   if (addStepButton) {
     addStepButton.classList.toggle('hidden', viewingCollection);
+    addStepButton.disabled = workspaceCollectionOpen && !editable;
   }
   if (editRandomGeneratorsJsonButton) {
     editRandomGeneratorsJsonButton.textContent = 'Edit Collection Constants';
@@ -2818,7 +2898,8 @@ async function openCollectionMember(collectionNode, memberName) {
 }
 
 async function openScenario(item, options = {}) {
-  const scenario = await api(scenarioFileUrl(item.path));
+  const raw = await api(scenarioFileUrl(item.path));
+  const scenario = applyDocumentAccess(raw);
   selectedScenarioName = item.path;
   const collectionNode = isCollectionNode(item) ? item : findTreeNode(activeCollectionPath);
   selectedFolderPath = collectionNode ? folderPathForCollection(collectionNode) : parentFolderPath(item.path);
@@ -3131,16 +3212,32 @@ function explorerMenuItems(target) {
   }
   if (target.kind === 'collection') {
     items.push({label: 'Export', action: () => exportCollectionForBruno(target.path)});
-    items.push({label: 'Share…', action: () => shareCollectionWithUser(target.path)});
+    const permission = target.permission || (target.source === 'shared' ? 'read' : 'owner');
+    const canEdit = permission === 'owner' || permission === 'edit';
+    const isOwner = permission === 'owner' && target.source !== 'shared';
+    if (isOwner && target.source === 'workspace') {
+      items.push({label: 'Share…', action: () => shareCollectionWithUser(target.path)});
+    }
     if (isWorkspacePath(target.path)) {
-      items.push({label: 'Import…', action: () => startCollectionImport(target.path)});
-      items.push({label: 'New scenario', action: () => createExplorerItem('scenario', target.path)});
-      items.push({label: 'Rename', action: () => renameExplorerItem(target)});
-      items.push({separator: true, label: 'Order'});
-      items.push({label: 'Move up', action: () => reorderByDelta('collections', target.parent, target.path, -1)});
-      items.push({label: 'Move down', action: () => reorderByDelta('collections', target.parent, target.path, 1)});
-      items.push({separator: true});
-      items.push({label: 'Delete', danger: true, action: () => deleteExplorerCollection(target.path)});
+      if (target.source === 'shared' || !isOwner) {
+        items.push({label: 'Copy to my workspace', action: () => forkCollectionPath(target.path)});
+      }
+      if (canEdit) {
+        items.push({label: 'Import…', action: () => startCollectionImport(target.path)});
+        items.push({label: 'New scenario', action: () => createExplorerItem('scenario', target.path)});
+      }
+      if (isOwner && target.source_collection_id) {
+        items.push({label: 'Compare with source', action: () => diffCollectionPath(target.path)});
+        items.push({label: 'Pull updates', action: () => syncCollectionPath(target.path)});
+      }
+      if (isOwner) {
+        items.push({label: 'Rename', action: () => renameExplorerItem(target)});
+        items.push({separator: true, label: 'Order'});
+        items.push({label: 'Move up', action: () => reorderByDelta('collections', target.parent, target.path, -1)});
+        items.push({label: 'Move down', action: () => reorderByDelta('collections', target.parent, target.path, 1)});
+        items.push({separator: true});
+        items.push({label: 'Delete', danger: true, action: () => deleteExplorerCollection(target.path)});
+      }
     } else {
       items.push({label: 'Copy to workspace', action: () => copyCollectionPath(target.path)});
     }
@@ -3148,12 +3245,16 @@ function explorerMenuItems(target) {
   }
   items.push({label: 'Copy to another collection…', action: () => copyScenarioToCollection(target.path, target.parent)});
   if (isWorkspacePath(target.path)) {
-    items.push({label: 'Rename', action: () => renameExplorerItem(target)});
-    items.push({separator: true, label: 'Order'});
-    items.push({label: 'Move up', action: () => reorderByDelta('scenarios', target.parent, target.path, -1)});
-    items.push({label: 'Move down', action: () => reorderByDelta('scenarios', target.parent, target.path, 1)});
-    items.push({separator: true});
-    items.push({label: 'Delete scenario', danger: true, action: () => deleteExplorerScenario(target.path)});
+    const permission = target.permission || findTreeNode(target.parent)?.permission || 'owner';
+    const canEdit = permission === 'owner' || permission === 'edit';
+    if (canEdit) {
+      items.push({label: 'Rename', action: () => renameExplorerItem(target)});
+      items.push({separator: true, label: 'Order'});
+      items.push({label: 'Move up', action: () => reorderByDelta('scenarios', target.parent, target.path, -1)});
+      items.push({label: 'Move down', action: () => reorderByDelta('scenarios', target.parent, target.path, 1)});
+      items.push({separator: true});
+      items.push({label: 'Delete scenario', danger: true, action: () => deleteExplorerScenario(target.path)});
+    }
   }
   return items;
 }
@@ -3486,34 +3587,142 @@ function userPickerLabel(user) {
   return name || email || String(user?.id || 'User');
 }
 
+function askUserLater(options) {
+  return new Promise((resolve) => {
+    window.setTimeout(() => {
+      void askUser(options).then(resolve);
+    }, 0);
+  });
+}
+
 async function shareCollectionWithUser(path) {
   try {
     if (!authState.authenticated) {
       throw new Error(requireSignInMessage());
+    }
+    const sharePath = path || activeCollectionPath || selectedScenarioName || '';
+    if (!isWorkspacePath(sharePath)) {
+      throw new Error('Copy the collection to your workspace first, then share it from My workspace.');
     }
     const data = await api('/api/users');
     const options = (data.users || []).map((user) => ({
       value: user.id,
       label: userPickerLabel(user),
     }));
+    if (!options.length) {
+      throw new Error('No other registered users are available to share with.');
+    }
     const userId = await askUser({
       title: 'Share collection',
-      help: options.length
-        ? 'Choose a user. A copy is added to their workspace.'
-        : 'No other registered users are available to share with.',
-      confirmLabel: 'Share',
+      help: 'They get live access under Shared with me — not a separate copy.',
+      confirmLabel: 'Next',
       options,
       emptyLabel: 'No other registered users.',
     });
     if (!userId) {
       return;
     }
+    const permission = await askUserLater({
+      title: 'Share permission',
+      help: 'Can view: read-only. Can edit: change scenarios and collection details.',
+      confirmLabel: 'Share',
+      options: [
+        {value: 'read', label: 'Can view'},
+        {value: 'edit', label: 'Can edit'},
+      ],
+    });
+    if (!permission) {
+      return;
+    }
     const shared = await api('/api/explorer/share-collection', {
       method: 'POST',
-      body: JSON.stringify({path, user_id: userId}),
+      body: JSON.stringify({path: sharePath, user_id: userId, permission}),
     });
+    expandedFolders.add('shared');
+    await loadScenarios();
+    const message =
+      `Shared “${shared.name || fileLabel(sharePath)}” with ${shared.recipient_name || 'user'} ` +
+      `(${shared.permission || permission}). They will see it under Shared with me.`;
     if (runOutput) {
-      runOutput.textContent = `Shared “${shared.name || fileLabel(path)}” with ${shared.recipient_name || 'user'}.`;
+      runOutput.textContent = message;
+    }
+    window.alert(message);
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+async function forkCollectionPath(path) {
+  try {
+    if (!authState.authenticated) {
+      throw new Error(requireSignInMessage());
+    }
+    const forked = await api('/api/explorer/fork-collection', {
+      method: 'POST',
+      body: JSON.stringify({path}),
+    });
+    expandedFolders.add('workspace');
+    expandedCollections.add(forked.path);
+    await loadScenarios();
+    await reopenScenarioFile(forked.path);
+    if (runOutput) {
+      runOutput.textContent = `Copied “${forked.name || fileLabel(path)}” to your workspace (linked to source for updates).`;
+    }
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+function formatDiffSummary(diff) {
+  if (!diff || diff.identical) {
+    return 'No differences from the source collection.';
+  }
+  const parts = [];
+  if (diff.added_in_source?.length) {
+    parts.push(`+${diff.added_in_source.length} in source`);
+  }
+  if (diff.removed_in_source?.length) {
+    parts.push(`-${diff.removed_in_source.length} only local`);
+  }
+  if (diff.changed_scenarios?.length) {
+    parts.push(`${diff.changed_scenarios.length} scenario(s) changed`);
+  }
+  if (diff.meta_changed?.length) {
+    parts.push(`meta: ${diff.meta_changed.join(', ')}`);
+  }
+  return parts.join(' · ') || 'Differences found.';
+}
+
+async function diffCollectionPath(path) {
+  try {
+    if (!authState.authenticated) {
+      throw new Error(requireSignInMessage());
+    }
+    const diff = await api(`/api/explorer/diff-collection?path=${encodeURIComponent(path)}`);
+    if (runOutput) {
+      runOutput.textContent = formatDiffSummary(diff);
+    }
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+async function syncCollectionPath(path) {
+  try {
+    if (!authState.authenticated) {
+      throw new Error(requireSignInMessage());
+    }
+    if (!window.confirm('Pull updates from the linked source? Local scenario changes will be overwritten.')) {
+      return;
+    }
+    const result = await api('/api/explorer/sync-collection', {
+      method: 'POST',
+      body: JSON.stringify({path}),
+    });
+    await loadScenarios();
+    await reopenScenarioFile(result.path || path);
+    if (runOutput) {
+      runOutput.textContent = `Pulled updates. ${formatDiffSummary(result.diff)}`;
     }
   } catch (error) {
     alert(error.message || String(error));
@@ -4328,6 +4537,11 @@ document.getElementById('auth-toggle')?.addEventListener('click', toggleAuth);
 if (copyCollectionButton) {
   copyCollectionButton.addEventListener('click', () => {
     void copyOpenCollection();
+  });
+}
+if (shareCollectionButton) {
+  shareCollectionButton.addEventListener('click', () => {
+    void shareCollectionWithUser(activeCollectionPath || selectedScenarioName);
   });
 }
 if (deleteCollectionButton) {

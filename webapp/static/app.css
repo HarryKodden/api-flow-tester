@@ -628,6 +628,24 @@ html[data-theme="light"] .icon-moon { display: none; }
   padding: 10px 6px;
 }
 
+.tree-row.is-shared .tree-label {
+  color: var(--accent);
+}
+
+.tree-badge {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 4px;
+  padding: 1px 5px;
+  flex: 0 0 auto;
+}
+
 .tree-row.kind-collection .tree-icon {
   color: var(--kind-collection-fg);
 }

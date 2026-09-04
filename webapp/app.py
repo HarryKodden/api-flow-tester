@@ -67,15 +67,15 @@ from webapp.auth import (
 from webapp.db import get_db, run_migrations
 from webapp.models import User
 from webapp.explorer import router as explorer_router
-from webapp.explorer import read_order, sort_named, workspace_tree
+from webapp.explorer import read_order, shared_with_me_tree, sort_named, workspace_tree
 from webapp.workspace import (
     LIBRARY_READONLY,
+    accessible_collection,
     attach_scenario,
     is_collection_filename,
     is_workspace_path,
     load_collection_env_values,
     materialize_workspace_run,
-    owned_collection,
     parse_workspace_path,
     router as workspace_router,
     unique_scenario_name,
@@ -328,6 +328,7 @@ def list_scenarios(
     }
     children = [public]
     if user is not None:
+        children.append(shared_with_me_tree(user, db))
         children.append(workspace_tree(user, db))
     tree["name"] = "Library"
     tree["children"] = children
@@ -1068,7 +1069,7 @@ async def import_scenario(
             status_code=400,
             detail="collection_id is required; import into an existing workspace collection",
         )
-    collection = owned_collection(db, user, collection_id)
+    collection, _permission = accessible_collection(db, user, collection_id, write=True)
     filename = unique_scenario_name(collection, desired_name or suggested_name)
     saved = attach_scenario(db, user, collection, filename, scenario)
     return {

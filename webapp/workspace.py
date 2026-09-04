@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from webapp.auth import current_user_required
 from webapp.db import get_db
-from webapp.models import Collection, CollectionEnvValue, Scenario, User
+from webapp.models import Collection, CollectionEnvValue, CollectionShare, Scenario, User
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES_DIR = ROOT / "examples"
@@ -118,6 +118,81 @@ def owned_collection(db: Session, user: User, collection_id: str) -> Collection:
     return collection
 
 
+def normalize_share_permission(value: Any) -> str:
+    permission = str(value or "read").strip().lower()
+    if permission not in {"read", "edit"}:
+        raise HTTPException(status_code=400, detail="permission must be read or edit")
+    return permission
+
+
+def get_share_for_user(db: Session, collection_id: str, user_id: str) -> CollectionShare | None:
+    return db.scalar(
+        select(CollectionShare).where(
+            CollectionShare.collection_id == collection_id,
+            CollectionShare.user_id == user_id,
+        )
+    )
+
+
+def upsert_collection_share(
+    db: Session,
+    *,
+    collection: Collection,
+    owner: User,
+    recipient: User,
+    permission: str,
+) -> CollectionShare:
+    if collection.owner_id != owner.id:
+        raise HTTPException(status_code=403, detail="Only the owner can manage shares")
+    if recipient.id == owner.id:
+        raise HTTPException(status_code=400, detail="Cannot share a collection with yourself")
+    cleaned = normalize_share_permission(permission)
+    existing = get_share_for_user(db, collection.id, recipient.id)
+    if existing is not None:
+        existing.permission = cleaned
+        existing.owner_id = owner.id
+        return existing
+    share = CollectionShare(
+        collection_id=collection.id,
+        owner_id=owner.id,
+        user_id=recipient.id,
+        permission=cleaned,
+    )
+    db.add(share)
+    db.flush()
+    return share
+
+
+def accessible_collection(
+    db: Session,
+    user: User,
+    collection_id: str,
+    *,
+    write: bool = False,
+) -> tuple[Collection, str]:
+    """Return (collection, permission) where permission is owner|edit|read."""
+    collection = db.scalar(
+        select(Collection)
+        .options(
+            selectinload(Collection.scenarios),
+            selectinload(Collection.env_values),
+            selectinload(Collection.owner),
+        )
+        .where(Collection.id == collection_id)
+    )
+    if collection is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    if collection.owner_id == user.id:
+        return collection, "owner"
+    share = get_share_for_user(db, collection_id, user.id)
+    if share is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    permission = normalize_share_permission(share.permission)
+    if write and permission != "edit":
+        raise HTTPException(status_code=403, detail="This shared collection is read-only")
+    return collection, permission
+
+
 def apply_collection_fields(collection: Collection, payload: dict[str, Any]) -> None:
     document = dict(payload) if isinstance(payload, dict) else {}
     name = str(document.get("name") or collection.name or "Untitled").strip() or "Untitled"
@@ -151,7 +226,12 @@ def unique_scenario_name(collection: Collection, desired: str) -> str:
 
 def attach_scenario(db: Session, user: User, collection: Collection, name: str, document: dict[str, Any]) -> Scenario:
     filename = unique_scenario_name(collection, name)
-    scenario = Scenario(owner_id=user.id, collection_id=collection.id, name=filename, document=document)
+    scenario = Scenario(
+        owner_id=collection.owner_id,
+        collection_id=collection.id,
+        name=filename,
+        document=document,
+    )
     db.add(scenario)
     members = [item.name for item in collection.scenarios]
     if filename not in members:
@@ -291,9 +371,19 @@ def clone_library_path(db: Session, user: User, library_path: str) -> Collection
     return collection
 
 
-def clone_workspace_collection_to_user(db: Session, source: Collection, recipient: User) -> Collection:
-    """Deep-copy a workspace collection (scenarios + private env values) to another user."""
-    if source.owner_id == recipient.id:
+def clone_workspace_collection_to_user(
+    db: Session,
+    source: Collection,
+    recipient: User,
+    *,
+    as_fork: bool = False,
+) -> Collection:
+    """Deep-copy a workspace collection (scenarios) to another user.
+
+    Private env values are only copied when the recipient is taking a fork for themselves
+    from a collection they can already access; live shares keep separate per-user env rows.
+    """
+    if source.owner_id == recipient.id and not as_fork:
         raise HTTPException(status_code=400, detail="Cannot share a collection with yourself")
 
     document = dict(source.document or {})
@@ -305,11 +395,12 @@ def clone_workspace_collection_to_user(db: Session, source: Collection, recipien
 
     collection = Collection(
         owner_id=recipient.id,
-        name=source.name,
+        name=source.name if not as_fork else f"{source.name} (copy)",
         description=source.description or "",
         selected_environment=source.selected_environment or "",
         folder="",
         position=next_owned_collection_position(db, recipient, ""),
+        source_collection_id=source.id if as_fork else None,
         document=document,
     )
     db.add(collection)
@@ -329,22 +420,116 @@ def clone_workspace_collection_to_user(db: Session, source: Collection, recipien
         cloned_names.append(member_name)
 
     document = dict(document)
+    document["name"] = collection.name
     document["scenarios"] = cloned_names
     apply_collection_fields(collection, document)
 
-    for env_row in source.env_values:
-        db.add(
-            CollectionEnvValue(
-                owner_id=recipient.id,
-                collection_id=collection.id,
-                environment_name=env_row.environment_name,
-                values=dict(env_row.values or {}),
+    if as_fork:
+        for env_row in source.env_values:
+            if env_row.owner_id not in {source.owner_id, recipient.id}:
+                continue
+            db.add(
+                CollectionEnvValue(
+                    owner_id=recipient.id,
+                    collection_id=collection.id,
+                    environment_name=env_row.environment_name,
+                    values=dict(env_row.values or {}),
+                )
             )
-        )
 
     db.flush()
     db.refresh(collection)
     return collection
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def diff_collections(local: Collection, source: Collection) -> dict[str, Any]:
+    local_docs = {item.name: dict(item.document or {}) for item in local.scenarios}
+    source_docs = {item.name: dict(item.document or {}) for item in source.scenarios}
+    local_names = set(local_docs)
+    source_names = set(source_docs)
+    changed = sorted(
+        name
+        for name in local_names & source_names
+        if _stable_json(local_docs[name]) != _stable_json(source_docs[name])
+    )
+    meta_changed: list[str] = []
+    if (local.description or "") != (source.description or ""):
+        meta_changed.append("description")
+    if (local.selected_environment or "") != (source.selected_environment or ""):
+        meta_changed.append("selected_environment")
+    local_envs = (local.document or {}).get("environments") if isinstance((local.document or {}).get("environments"), dict) else {}
+    source_envs = (source.document or {}).get("environments") if isinstance((source.document or {}).get("environments"), dict) else {}
+    if _stable_json(local_envs) != _stable_json(source_envs):
+        meta_changed.append("environments")
+    local_consts = (local.document or {}).get("random_generators") if isinstance((local.document or {}).get("random_generators"), dict) else {}
+    source_consts = (source.document or {}).get("random_generators") if isinstance((source.document or {}).get("random_generators"), dict) else {}
+    if _stable_json(local_consts) != _stable_json(source_consts):
+        meta_changed.append("random_generators")
+
+    return {
+        "local_id": local.id,
+        "local_name": local.name,
+        "source_id": source.id,
+        "source_name": source.name,
+        "added_in_source": sorted(source_names - local_names),
+        "removed_in_source": sorted(local_names - source_names),
+        "changed_scenarios": changed,
+        "meta_changed": meta_changed,
+        "identical": not (
+            (source_names - local_names)
+            or (local_names - source_names)
+            or changed
+            or meta_changed
+        ),
+    }
+
+
+def sync_collection_from_source(db: Session, local: Collection, source: Collection) -> dict[str, Any]:
+    diff = diff_collections(local, source)
+    keep_name = local.name
+    document = dict(source.document or {})
+    document["name"] = keep_name
+    document["description"] = source.description or ""
+    document["selected_environment"] = source.selected_environment or document.get("selected_environment") or ""
+    document["scenarios"] = [item.name for item in source.scenarios]
+    document["steps"] = []
+
+    by_name = {item.name: item for item in list(local.scenarios)}
+    source_names = {item.name for item in source.scenarios}
+    for scenario in list(local.scenarios):
+        if scenario.name not in source_names:
+            db.delete(scenario)
+    db.flush()
+
+    cloned_names: list[str] = []
+    for source_scenario in source.scenarios:
+        member_name = safe_filename(source_scenario.name)
+        existing = by_name.get(member_name)
+        payload = dict(source_scenario.document or {})
+        if existing is None:
+            db.add(
+                Scenario(
+                    owner_id=local.owner_id,
+                    collection_id=local.id,
+                    name=member_name,
+                    document=payload,
+                )
+            )
+        else:
+            existing.document = payload
+            existing.updated_at = utcnow()
+        cloned_names.append(member_name)
+
+    document["scenarios"] = cloned_names
+    apply_collection_fields(local, document)
+    local.source_collection_id = source.id
+    db.flush()
+    db.refresh(local)
+    return {"status": "synced", "diff": diff, "path": workspace_collection_path(local.id), "name": local.name}
 
 
 def string_env_map(values: Any) -> dict[str, str]:
@@ -399,7 +584,7 @@ def upsert_collection_env_values(
 
 def materialize_workspace_run(db: Session, user: User, path: str, dest_dir: Path) -> Path:
     collection_id, filename = parse_workspace_path(path)
-    collection = owned_collection(db, user, collection_id)
+    collection, _permission = accessible_collection(db, user, collection_id)
     if is_collection_filename(filename) or filename == safe_filename(collection.name):
         collection_path = dest_dir / COLLECTION_FILENAME
         collection_path.write_text(json.dumps(collection_document_for_client(collection), indent=2), encoding="utf-8")
@@ -424,13 +609,27 @@ def get_workspace_file(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     collection_id, filename = parse_workspace_path(path)
-    collection = owned_collection(db, user, collection_id)
+    collection, permission = accessible_collection(db, user, collection_id)
     if is_collection_filename(filename):
-        return collection_document_for_client(collection)
+        document = collection_document_for_client(collection)
+        document["_access"] = {
+            "permission": permission,
+            "owner_id": collection.owner_id,
+            "owner_name": (collection.owner.name if collection.owner else "") or "",
+            "source_collection_id": collection.source_collection_id,
+            "source_collection_path": (
+                workspace_collection_path(collection.source_collection_id)
+                if collection.source_collection_id
+                else ""
+            ),
+        }
+        return document
     scenario = next((item for item in collection.scenarios if item.name == filename), None)
     if scenario is None:
         raise HTTPException(status_code=404, detail="Scenario not found")
-    return dict(scenario.document or {})
+    document = dict(scenario.document or {})
+    document["_access"] = {"permission": permission, "owner_id": collection.owner_id}
+    return document
 
 
 @router.post("/file")
@@ -442,17 +641,18 @@ def save_workspace_file(
 ) -> dict[str, str]:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Document must be an object")
+    cleaned = {key: value for key, value in payload.items() if key != "_access"}
     collection_id, filename = parse_workspace_path(path)
-    collection = owned_collection(db, user, collection_id)
-    if is_collection_filename(filename) or is_collection_document(payload):
-        apply_collection_fields(collection, payload)
+    collection, _permission = accessible_collection(db, user, collection_id, write=True)
+    if is_collection_filename(filename) or is_collection_document(cleaned):
+        apply_collection_fields(collection, cleaned)
         return {"status": "saved", "path": workspace_collection_path(collection.id)}
     filename = safe_filename(filename)
     scenario = next((item for item in collection.scenarios if item.name == filename), None)
     if scenario is None:
-        scenario = attach_scenario(db, user, collection, filename, payload)
+        scenario = attach_scenario(db, user, collection, filename, cleaned)
     else:
-        scenario.document = payload
+        scenario.document = cleaned
         scenario.updated_at = utcnow()
         collection.updated_at = utcnow()
     return {"status": "saved", "path": workspace_scenario_path(collection.id, scenario.name)}
@@ -465,7 +665,7 @@ def workspace_parent_collection(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     collection_id, filename = parse_workspace_path(path)
-    collection = owned_collection(db, user, collection_id)
+    collection, _permission = accessible_collection(db, user, collection_id)
     if is_collection_filename(filename):
         return {"status": "none"}
     document = collection_document_for_client(collection)
@@ -549,10 +749,11 @@ def delete_item(
 
 def delete_workspace_item(db: Session, user: User, path: str) -> dict[str, Any]:
     collection_id, filename = parse_workspace_path(path)
-    collection = owned_collection(db, user, collection_id)
     if is_collection_filename(filename):
+        collection = owned_collection(db, user, collection_id)
         db.delete(collection)
         return {"status": "deleted", "kind": "collection", "path": path}
+    collection, _permission = accessible_collection(db, user, collection_id, write=True)
     scenario = next((item for item in collection.scenarios if item.name == filename), None)
     if scenario is None:
         raise HTTPException(status_code=404, detail="Scenario not found")
@@ -618,7 +819,7 @@ def get_collection_env(
     user: User = Depends(current_user_required),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    collection = owned_collection(db, user, collection_id)
+    collection, _permission = accessible_collection(db, user, collection_id)
     env_name = environment or collection.selected_environment or ""
     return {
         "environment": env_name,
@@ -633,7 +834,9 @@ def put_collection_env(
     user: User = Depends(current_user_required),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    collection = owned_collection(db, user, collection_id)
+    collection, permission = accessible_collection(db, user, collection_id)
+    if permission == "read":
+        raise HTTPException(status_code=403, detail="Read-only share")
     env_name = str(payload.get("environment") or collection.selected_environment or "").strip()
     if not env_name:
         raise HTTPException(status_code=400, detail="environment is required")

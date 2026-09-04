@@ -44,6 +44,9 @@ class Collection(Base):
     selected_environment: Mapped[str] = mapped_column(String(255), default="")
     folder: Mapped[str] = mapped_column(String(255), default="")
     position: Mapped[int] = mapped_column(Integer, default=0)
+    source_collection_id: Mapped[str | None] = mapped_column(
+        ForeignKey("collections.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     document: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
@@ -57,6 +60,14 @@ class Collection(Base):
     env_values: Mapped[list[CollectionEnvValue]] = relationship(
         back_populates="collection",
         cascade="all, delete-orphan",
+    )
+    shares: Mapped[list[CollectionShare]] = relationship(
+        back_populates="collection",
+        cascade="all, delete-orphan",
+    )
+    source_collection: Mapped[Collection | None] = relationship(
+        remote_side="Collection.id",
+        foreign_keys=[source_collection_id],
     )
 
 
@@ -81,7 +92,9 @@ class Scenario(Base):
 
 class CollectionEnvValue(Base):
     __tablename__ = "collection_env_values"
-    __table_args__ = (UniqueConstraint("collection_id", "environment_name", name="uq_collection_env"),)
+    __table_args__ = (
+        UniqueConstraint("collection_id", "owner_id", "environment_name", name="uq_collection_env_owner"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
     owner_id: Mapped[str] = mapped_column(
@@ -95,6 +108,28 @@ class CollectionEnvValue(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
     collection: Mapped[Collection] = relationship(back_populates="env_values")
+
+
+class CollectionShare(Base):
+    __tablename__ = "collection_shares"
+    __table_args__ = (UniqueConstraint("collection_id", "user_id", name="uq_collection_shares_collection_user"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("collections.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    owner_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    permission: Mapped[str] = mapped_column(String(16), default="read")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    collection: Mapped[Collection] = relationship(back_populates="shares")
+    recipient: Mapped[User] = relationship(foreign_keys=[user_id])
+    sharer: Mapped[User] = relationship(foreign_keys=[owner_id])
 
 
 class WorkspaceFolder(Base):

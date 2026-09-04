@@ -14,26 +14,32 @@ from sqlalchemy.orm import Session, selectinload
 from tools.bruno_export import bruno_export_filename, collection_to_bruno
 from webapp.auth import current_user_required
 from webapp.db import get_db
-from webapp.models import Collection, Scenario, User, WorkspaceFolder
+from webapp.models import Collection, CollectionShare, Scenario, User, WorkspaceFolder
 from webapp.workspace import (
     COLLECTION_FILENAME,
     EXAMPLES_DIR,
     LIBRARY_READONLY,
+    accessible_collection,
     attach_scenario,
     clone_library_path,
     clone_workspace_collection_to_user,
     collection_document_for_client,
+    diff_collections,
     empty_collection_document,
+    get_share_for_user,
     is_collection_document,
     is_collection_filename,
     is_workspace_path,
     load_collection_env_values,
     next_owned_collection_position,
+    normalize_share_permission,
     owned_collection,
     parse_workspace_path,
     resolve_examples_path,
     safe_filename,
+    sync_collection_from_source,
     unique_scenario_name,
+    upsert_collection_share,
     utcnow,
     workspace_collection_path,
     workspace_scenario_path,
@@ -157,7 +163,13 @@ def next_folder_position(db: Session, user: User, parent: str = "") -> int:
     return int(current or 0) + 1
 
 
-def collection_node(collection: Collection) -> dict[str, Any]:
+def collection_node(
+    collection: Collection,
+    *,
+    source: str = "workspace",
+    permission: str = "owner",
+    owner_name: str = "",
+) -> dict[str, Any]:
     document = collection_document_for_client(collection)
     members = document.get("scenarios") if isinstance(document.get("scenarios"), list) else []
     return {
@@ -165,12 +177,50 @@ def collection_node(collection: Collection) -> dict[str, Any]:
         "kind": "collection",
         "name": collection.name or COLLECTION_FILENAME,
         "path": workspace_collection_path(collection.id),
-        "source": "workspace",
+        "source": source,
+        "permission": permission,
+        "owner_name": owner_name,
+        "owner_id": collection.owner_id,
+        "source_collection_id": collection.source_collection_id,
         "folder": collection.folder or "",
         "base_url": (collection.document or {}).get("base_url"),
         "step_count": 0,
         "member_count": len(members),
         "members": members,
+    }
+
+
+def shared_with_me_tree(user: User, db: Session) -> dict[str, Any]:
+    shares = db.scalars(
+        select(CollectionShare)
+        .options(
+            selectinload(CollectionShare.collection).selectinload(Collection.scenarios),
+            selectinload(CollectionShare.collection).selectinload(Collection.owner),
+        )
+        .where(CollectionShare.user_id == user.id)
+        .order_by(CollectionShare.created_at.desc())
+    ).all()
+    children: list[dict[str, Any]] = []
+    for share in shares:
+        collection = share.collection
+        if collection is None:
+            continue
+        owner = collection.owner
+        children.append(
+            collection_node(
+                collection,
+                source="shared",
+                permission=normalize_share_permission(share.permission),
+                owner_name=(owner.name if owner else "") or (owner.email if owner else "") or "",
+            )
+        )
+    return {
+        "type": "dir",
+        "kind": "folder",
+        "name": "Shared with me",
+        "path": "shared",
+        "source": "shared",
+        "children": children,
     }
 
 
@@ -258,7 +308,7 @@ def create_workspace_collection(db: Session, user: User, name: str, folder: str)
 
 def create_workspace_scenario(db: Session, user: User, collection_path: str, name: str) -> dict[str, Any]:
     collection_id, _filename = parse_workspace_path(collection_path)
-    collection = owned_collection(db, user, collection_id)
+    collection, _permission = accessible_collection(db, user, collection_id, write=True)
     filename = unique_scenario_name(collection, name)
     scenario = attach_scenario(db, user, collection, filename, {"name": Path(filename).stem, "steps": []})
     return {
@@ -339,7 +389,7 @@ def unique_scenario_name_in_dir(directory: Path, desired: str) -> str:
 def load_item_document(db: Session, user: User, path: str) -> tuple[dict[str, Any], str]:
     if is_workspace_path(path):
         collection_id, filename = parse_workspace_path(path)
-        collection = owned_collection(db, user, collection_id)
+        collection, _permission = accessible_collection(db, user, collection_id)
         if is_collection_filename(filename):
             return collection_document_for_client(collection), "collection"
         scenario = next((item for item in collection.scenarios if item.name == filename), None)
@@ -362,7 +412,7 @@ def copy_scenario(db: Session, user: User, source: str, dest_collection: str) ->
     name = Path(source).name
     if is_workspace_path(dest_collection):
         collection_id, _filename = parse_workspace_path(dest_collection)
-        collection = owned_collection(db, user, collection_id)
+        collection, _permission = accessible_collection(db, user, collection_id, write=True)
         saved = attach_scenario(db, user, collection, name, document)
         return {
             "status": "copied",
@@ -413,7 +463,7 @@ def reorder_collection_scenarios(db: Session, user: User, collection_path: str, 
     names = [Path(item).name for item in items]
     if is_workspace_path(collection_path):
         collection_id, _filename = parse_workspace_path(collection_path)
-        collection = owned_collection(db, user, collection_id)
+        collection, _permission = accessible_collection(db, user, collection_id, write=True)
         payload = collection_document_for_client(collection)
         payload["scenarios"] = names
         collection.document = payload
@@ -638,7 +688,7 @@ def rename_workspace_scenario(db: Session, user: User, path: str, name: str) -> 
     collection_id, filename = parse_workspace_path(path)
     if is_collection_filename(filename):
         raise HTTPException(status_code=400, detail="Not a scenario path")
-    collection = owned_collection(db, user, collection_id)
+    collection, _permission = accessible_collection(db, user, collection_id, write=True)
     scenario = next((item for item in collection.scenarios if item.name == filename), None)
     if scenario is None:
         raise HTTPException(status_code=404, detail="Scenario not found")
@@ -720,7 +770,7 @@ def load_collection_export_payload(db: Session, user: User, path: str) -> tuple[
         collection_id, filename = parse_workspace_path(path)
         if not is_collection_filename(filename):
             raise HTTPException(status_code=400, detail="Export is only available for collections")
-        collection = owned_collection(db, user, collection_id)
+        collection, _permission = accessible_collection(db, user, collection_id)
         document = collection_document_for_client(collection)
         members = [(item.name, dict(item.document or {})) for item in collection.scenarios]
         env_base = document.get("environments") if isinstance(document.get("environments"), dict) else {}
@@ -783,6 +833,7 @@ def share_collection(
 ) -> dict[str, Any]:
     path = str(payload.get("path") or "").strip()
     recipient_id = str(payload.get("user_id") or "").strip()
+    permission = normalize_share_permission(payload.get("permission") or "read")
     if not path:
         raise HTTPException(status_code=400, detail="path is required")
     if not recipient_id:
@@ -798,17 +849,146 @@ def share_collection(
         collection_id, filename = parse_workspace_path(path)
         if not is_collection_filename(filename):
             raise HTTPException(status_code=400, detail="Share is only available for collections")
-        source = owned_collection(db, user, collection_id)
-        shared = clone_workspace_collection_to_user(db, source, recipient)
+        collection = owned_collection(db, user, collection_id)
     else:
-        shared = clone_library_path(db, recipient, path)
+        # Library files are first copied into the sharer's workspace, then live-shared.
+        # Recipients must not get an independent owned copy.
+        collection = clone_library_path(db, user, path)
 
+    share = upsert_collection_share(
+        db,
+        collection=collection,
+        owner=user,
+        recipient=recipient,
+        permission=permission,
+    )
     return {
         "status": "shared",
-        "path": path,
+        "mode": "live",
+        "path": workspace_collection_path(collection.id),
         "recipient_id": recipient.id,
         "recipient_name": recipient.name or recipient.email or recipient.id,
-        "collection_id": shared.id,
-        "collection_path": workspace_collection_path(shared.id),
-        "name": shared.name,
+        "permission": share.permission,
+        "collection_id": collection.id,
+        "collection_path": workspace_collection_path(collection.id),
+        "name": collection.name,
     }
+
+
+@router.get("/collection-shares")
+def list_collection_shares(
+    path: str = Query(..., min_length=1),
+    user: User = Depends(current_user_required),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if not is_workspace_path(path):
+        raise HTTPException(status_code=400, detail="Shares are only available for workspace collections")
+    collection_id, filename = parse_workspace_path(path)
+    if not is_collection_filename(filename):
+        raise HTTPException(status_code=400, detail="Shares are only available for collections")
+    collection = owned_collection(db, user, collection_id)
+    shares = db.scalars(
+        select(CollectionShare)
+        .options(selectinload(CollectionShare.recipient))
+        .where(CollectionShare.collection_id == collection.id)
+        .order_by(CollectionShare.created_at.desc())
+    ).all()
+    return {
+        "collection_id": collection.id,
+        "shares": [
+            {
+                "user_id": share.user_id,
+                "user_name": (share.recipient.name if share.recipient else "")
+                or (share.recipient.email if share.recipient else "")
+                or share.user_id,
+                "permission": normalize_share_permission(share.permission),
+                "created_at": share.created_at.isoformat() if share.created_at else "",
+            }
+            for share in shares
+        ],
+    }
+
+
+@router.delete("/collection-shares")
+def revoke_collection_share(
+    path: str = Query(..., min_length=1),
+    user_id: str = Query(..., min_length=1),
+    user: User = Depends(current_user_required),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if not is_workspace_path(path):
+        raise HTTPException(status_code=400, detail="Shares are only available for workspace collections")
+    collection_id, filename = parse_workspace_path(path)
+    if not is_collection_filename(filename):
+        raise HTTPException(status_code=400, detail="Shares are only available for collections")
+    collection = owned_collection(db, user, collection_id)
+    share = get_share_for_user(db, collection.id, user_id)
+    if share is None:
+        raise HTTPException(status_code=404, detail="Share not found")
+    db.delete(share)
+    return {"status": "revoked", "collection_id": collection.id, "user_id": user_id}
+
+
+@router.post("/fork-collection")
+def fork_collection(
+    payload: dict[str, Any],
+    user: User = Depends(current_user_required),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    path = str(payload.get("path") or "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    if not is_workspace_path(path):
+        raise HTTPException(status_code=400, detail="Fork is only available for workspace collections")
+    collection_id, filename = parse_workspace_path(path)
+    if not is_collection_filename(filename):
+        raise HTTPException(status_code=400, detail="Fork is only available for collections")
+    source, _permission = accessible_collection(db, user, collection_id)
+    forked = clone_workspace_collection_to_user(db, source, user, as_fork=True)
+    return {
+        "status": "forked",
+        "id": forked.id,
+        "path": workspace_collection_path(forked.id),
+        "name": forked.name,
+        "source_collection_id": forked.source_collection_id,
+        "scenarios": [item.name for item in forked.scenarios],
+    }
+
+
+@router.get("/diff-collection")
+def diff_collection_route(
+    path: str = Query(..., min_length=1),
+    user: User = Depends(current_user_required),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if not is_workspace_path(path):
+        raise HTTPException(status_code=400, detail="Diff is only available for workspace collections")
+    collection_id, filename = parse_workspace_path(path)
+    if not is_collection_filename(filename):
+        raise HTTPException(status_code=400, detail="Diff is only available for collections")
+    local = owned_collection(db, user, collection_id)
+    if not local.source_collection_id:
+        raise HTTPException(status_code=400, detail="Collection has no linked source to compare")
+    source, _permission = accessible_collection(db, user, local.source_collection_id)
+    return {"status": "ok", **diff_collections(local, source)}
+
+
+@router.post("/sync-collection")
+def sync_collection_route(
+    payload: dict[str, Any],
+    user: User = Depends(current_user_required),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    path = str(payload.get("path") or "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    if not is_workspace_path(path):
+        raise HTTPException(status_code=400, detail="Sync is only available for workspace collections")
+    collection_id, filename = parse_workspace_path(path)
+    if not is_collection_filename(filename):
+        raise HTTPException(status_code=400, detail="Sync is only available for collections")
+    local = owned_collection(db, user, collection_id)
+    if not local.source_collection_id:
+        raise HTTPException(status_code=400, detail="Collection has no linked source to sync from")
+    source, _permission = accessible_collection(db, user, local.source_collection_id)
+    return sync_collection_from_source(db, local, source)
