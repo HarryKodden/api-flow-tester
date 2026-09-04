@@ -8,19 +8,24 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import requests
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi import Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from sqlalchemy.orm import Session
+from starlette.datastructures import MutableHeaders
+from starlette.middleware.sessions import SessionMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 
+from tools.curl_import import parse_curl_command
 from tools.scenario_runner import (
     apply_save,
     apply_suite_defaults,
@@ -32,10 +37,47 @@ from tools.scenario_runner import (
     preview_step_request,
     require_routable_api_targets,
     is_forbidden_api_host,
+    parse_target_hostname,
     ROUTABLE_HOST_HELP,
     run_step,
 )
 from tools.oauth_helpers import stop_cimd_metadata_servers
+from authlib.integrations.base_client.errors import MismatchingStateError, OAuthError
+
+from webapp.auth import (
+    OIDC_REDIRECT_URI,
+    SESSION_SECRET,
+    attach_oidc_state_cookie,
+    clear_oidc_state_cookie,
+    complete_oidc_login,
+    configure_oauth,
+    current_user_optional,
+    current_user_required,
+    get_or_create_user,
+    login_on_callback_host,
+    oauth,
+    oidc_enabled,
+    public_user,
+    session_https_only,
+)
+from webapp.db import get_db, run_migrations
+from webapp.models import Suite, User
+from webapp.explorer import router as explorer_router
+from webapp.explorer import read_order, sort_named, workspace_tree
+from webapp.workspace import (
+    LIBRARY_READONLY,
+    SUITE_FILENAME,
+    attach_scenario,
+    empty_suite_document,
+    is_workspace_path,
+    load_suite_env_values,
+    materialize_workspace_run,
+    owned_suite,
+    parse_workspace_path,
+    router as workspace_router,
+    unique_scenario_name,
+    workspace_scenario_path,
+)
 
 try:
     import yaml
@@ -47,6 +89,13 @@ EXAMPLES_DIR = ROOT / "examples"
 BIN_DIR = ROOT / "bin"
 
 EXAMPLES_DIR.mkdir(parents=True, exist_ok=True)
+configure_oauth()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    run_migrations()
+    yield
 
 NO_STORE_HEADERS = {"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"}
 _BEARER_RE = re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)([^\s\"']+)")
@@ -64,24 +113,42 @@ def _json(content: Any, status_code: int = 200) -> JSONResponse:
 
 RELEASE = (os.environ.get("RELEASE") or "dev").strip() or "dev"
 
-app = FastAPI(title="Regression Tester", version=RELEASE)
+
+class NoStoreAPICacheMiddleware:
+    """Add no-store headers without BaseHTTPMiddleware, which can drop Set-Cookie."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path") or ""
+
+        async def send_wrapper(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start" and (path == "/" or path.startswith("/api/")):
+                headers = MutableHeaders(scope=message)
+                headers["Cache-Control"] = "no-store, max-age=0"
+                headers["Pragma"] = "no-cache"
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+app = FastAPI(title="Regression Tester", version=RELEASE, lifespan=lifespan)
+app.include_router(workspace_router)
+app.include_router(explorer_router)
+app.add_middleware(NoStoreAPICacheMiddleware)
+# Outermost: session cookie must wrap every other middleware or OIDC state is lost.
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    SessionMiddleware,
+    secret_key=SESSION_SECRET,
+    session_cookie="aft_session",
+    same_site="lax",
+    https_only=session_https_only(),
+    max_age=14 * 24 * 60 * 60,
 )
-
-
-@app.middleware("http")
-async def disable_cache(request: Request, call_next):
-    response = await call_next(request)
-    path = request.url.path
-    if path == "/" or path.startswith("/api/"):
-        response.headers["Cache-Control"] = "no-store, max-age=0"
-        response.headers["Pragma"] = "no-cache"
-    return response
 
 
 app.mount("/static", StaticFiles(directory=ROOT / "webapp" / "static"), name="static")
@@ -91,6 +158,53 @@ templates = Jinja2Templates(directory=str(ROOT / "webapp" / "templates"))
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "release": RELEASE}
+
+
+@app.get("/api/me")
+def me(user: User | None = Depends(current_user_optional)) -> dict[str, Any]:
+    return public_user(user)
+
+
+@app.get("/login")
+async def login(request: Request):
+    if not oidc_enabled():
+        raise HTTPException(status_code=400, detail="OIDC is not configured")
+    bounce = login_on_callback_host(request)
+    if bounce is not None:
+        return bounce
+    response = await oauth.oidc.authorize_redirect(request, OIDC_REDIRECT_URI)
+    return attach_oidc_state_cookie(response, request)
+
+
+@app.get("/auth/callback")
+async def auth_callback(request: Request, db: Session = Depends(get_db)):
+    if not oidc_enabled():
+        raise HTTPException(status_code=400, detail="OIDC is not configured")
+    try:
+        claims = await complete_oidc_login(request)
+    except MismatchingStateError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Sign-in session expired or the browser opened a different host. Open http://127.0.0.1:9011 and try Sign in again.",
+        ) from exc
+    except OAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    user = get_or_create_user(
+        db,
+        issuer=str(claims.get("iss") or os.environ.get("OIDC_ISSUER") or "").strip(),
+        sub=str(claims.get("sub") or "").strip(),
+        email=str(claims.get("email") or "") or None,
+        name=str(claims.get("name") or claims.get("preferred_username") or "") or None,
+    )
+    request.session["user_id"] = user.id
+    response = RedirectResponse(url="/", status_code=302)
+    return clear_oidc_state_cookie(response)
+
+
+@app.get("/logout")
+async def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse(url="/", status_code=302)
 
 
 def _normalize_examples_rel(relative: str, *, allow_empty: bool = False) -> str:
@@ -135,7 +249,10 @@ def _scenario_file_node(path: Path, relative: str) -> dict[str, Any]:
         data = {}
     members = data.get("scenarios")
     steps = data.get("steps") or []
-    is_suite = isinstance(members, list) and len(members) > 0 and len(steps) == 0
+    is_suite = path.name == SUITE_FILENAME or (
+        isinstance(members, list) and len(members) > 0 and len(steps) == 0
+    )
+    member_names = [name for name in members if isinstance(name, str) and name.strip()] if isinstance(members, list) else []
     return {
         "type": "file",
         "name": path.name,
@@ -143,8 +260,8 @@ def _scenario_file_node(path: Path, relative: str) -> dict[str, Any]:
         "base_url": data.get("base_url"),
         "kind": "suite" if is_suite else "scenario",
         "step_count": len(steps) if isinstance(steps, list) else 0,
-        "member_count": len(members) if is_suite else 0,
-        "members": [name for name in members if isinstance(name, str) and name.strip()] if is_suite else [],
+        "member_count": len(member_names) if is_suite else 0,
+        "members": member_names if is_suite else [],
     }
 
 
@@ -159,17 +276,40 @@ def _build_examples_tree(directory: Path, relative: str) -> dict[str, Any]:
             children.append(_build_examples_tree(entry, child_rel))
         elif entry.suffix.lower() == ".json":
             children.append(_scenario_file_node(entry, child_rel))
+    for child in children:
+        child["source"] = "library"
+        child["order_key"] = Path(child.get("path") or child.get("name") or "").name
+    children = sort_named(children, read_order(directory))
     return {
         "type": "dir",
+        "kind": "folder",
         "name": directory.name if relative else "examples",
         "path": relative.replace("\\", "/"),
+        "source": "library",
         "children": children,
     }
 
 
 @app.get("/api/scenarios")
-def list_scenarios() -> JSONResponse:
-    return _json(_build_examples_tree(EXAMPLES_DIR, ""))
+def list_scenarios(
+    user: User | None = Depends(current_user_optional),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    tree = _build_examples_tree(EXAMPLES_DIR, "")
+    public = {
+        "type": "dir",
+        "kind": "folder",
+        "name": "Public library",
+        "path": "examples",
+        "source": "library",
+        "children": tree.get("children") or [],
+    }
+    children = [public]
+    if user is not None:
+        children.append(workspace_tree(user, db))
+    tree["name"] = "Library"
+    tree["children"] = children
+    return _json(tree)
 
 
 @app.get("/api/scenarios/parent-suite")
@@ -218,23 +358,14 @@ def get_scenario(path: str = Query(..., min_length=1)) -> JSONResponse:
 
 @app.post("/api/scenarios/file")
 def save_scenario(payload: dict[str, Any], path: str = Query(..., min_length=1)) -> dict[str, str]:
-    rel = _normalize_examples_rel(path)
-    if not rel.endswith(".json"):
-        raise HTTPException(status_code=400, detail="Scenario path must end with .json")
-    file_path = _resolve_examples_path(rel)
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    file_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return {"status": "saved", "path": rel}
+    if is_workspace_path(path):
+        raise HTTPException(status_code=400, detail="Use /api/workspace/file for workspace documents")
+    raise HTTPException(status_code=403, detail=LIBRARY_READONLY)
 
 
 @app.post("/api/scenarios/folders")
 def create_scenario_folder(payload: dict[str, Any]) -> dict[str, str]:
-    rel = _normalize_examples_rel(str(payload.get("path") or ""))
-    folder_path = _resolve_examples_path(rel)
-    if folder_path.exists():
-        raise HTTPException(status_code=409, detail="Path already exists")
-    folder_path.mkdir(parents=True, exist_ok=False)
-    return {"status": "created", "path": rel}
+    raise HTTPException(status_code=403, detail=LIBRARY_READONLY)
 
 
 def _safe_scenario_rel_path(value: str) -> str:
@@ -688,10 +819,6 @@ def _get_scenario_environment_values(scenario: dict[str, Any], selected_environm
     chosen_name = selected_environment or str(scenario.get("selected_environment") or "")
     if chosen_name and isinstance(environments.get(chosen_name), dict):
         return dict(environments[chosen_name])
-
-    for value in environments.values():
-        if isinstance(value, dict):
-            return dict(value)
     return {}
 
 
@@ -700,6 +827,23 @@ def _resolve_scenario_environment_values(
     selected_environment: str | None = None,
 ) -> dict[str, Any]:
     return _get_scenario_environment_values(scenario, selected_environment)
+
+
+def _usable_base_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text if parse_target_hostname(text) else ""
+
+
+def _base_url_from_steps(steps: list[dict[str, Any]]) -> str:
+    for step in steps:
+        raw = str(step.get("path") or step.get("url") or "").strip()
+        if raw.startswith("http://") or raw.startswith("https://"):
+            parsed = urlparse(raw)
+            if parsed.netloc:
+                return f"{parsed.scheme}://{parsed.netloc}"
+    return ""
 
 
 def _get_scenario_base_url(scenario: dict[str, Any], selected_environment: str | None = None) -> str:
@@ -736,8 +880,11 @@ def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], di
     if not isinstance(steps, list) or not steps:
         raise HTTPException(status_code=400, detail="scenario has no steps")
     selected_environment = payload.get("selected_environment") or scenario.get("selected_environment")
-    base_url = payload.get("base_url") or _get_scenario_base_url(scenario, selected_environment)
-    base_url = str(base_url or "")
+    base_url = (
+        _usable_base_url(payload.get("base_url"))
+        or _usable_base_url(_get_scenario_base_url(scenario, selected_environment))
+        or _base_url_from_steps(steps)
+    )
     random_generators = scenario.get("random_generators", {})
     environment_values = _resolve_scenario_environment_values(scenario, selected_environment)
     overrides = payload.get("environment_overrides")
@@ -751,9 +898,11 @@ def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], di
                 status_code=400,
                 detail=f"Environment variables need a value: {', '.join(missing)}",
             )
-        env_host = environment_values.get("server") or environment_values.get("base_url")
-        if isinstance(env_host, str) and env_host.strip():
-            base_url = env_host.strip()
+        env_host = _usable_base_url(environment_values.get("server") or environment_values.get("base_url"))
+        if env_host:
+            base_url = env_host
+        if not base_url:
+            base_url = _base_url_from_steps(steps)
         try:
             require_routable_api_targets(environment_values, extra_urls=[base_url])
         except SystemExit as exc:
@@ -851,7 +1000,13 @@ def _parse_import_payload(raw_bytes: bytes, filename: str) -> dict[str, Any]:
 
 
 @app.post("/api/scenarios/import/file")
-async def import_scenario(file: UploadFile = File(...), scenario_name: str | None = Form(default=None)) -> dict[str, Any]:
+async def import_scenario(
+    request: Request,
+    file: UploadFile = File(...),
+    scenario_name: str | None = Form(default=None),
+    user: User = Depends(current_user_required),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="Import file is required")
 
@@ -866,22 +1021,38 @@ async def import_scenario(file: UploadFile = File(...), scenario_name: str | Non
         raise HTTPException(status_code=400, detail="Converted scenario is invalid")
 
     desired_name = scenario_name.strip() if isinstance(scenario_name, str) else ""
-    final_name = _unique_scenario_name(desired_name or suggested_name)
-    path = EXAMPLES_DIR / final_name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(scenario, indent=2), encoding="utf-8")
-
+    suite_id = (request.query_params.get("suite_id") or "").strip()
+    if suite_id:
+        suite = owned_suite(db, user, suite_id)
+    else:
+        suite = Suite(
+            owner_id=user.id,
+            name=str(suggested_name or "Imported"),
+            description="",
+            selected_environment="",
+            document=empty_suite_document(str(suggested_name or "Imported")),
+        )
+        db.add(suite)
+        db.flush()
+    filename = unique_scenario_name(suite, desired_name or suggested_name)
+    saved = attach_scenario(db, user, suite, filename, scenario)
     return {
         "status": "imported",
-        "name": final_name,
-        "path": str(path.relative_to(ROOT)),
+        "name": workspace_scenario_path(suite.id, saved.name),
+        "path": workspace_scenario_path(suite.id, saved.name),
+        "suite_id": suite.id,
+        "suite_path": f"workspace/{suite.id}/suite.json",
         "scenario": scenario,
         "step_count": len(scenario.get("steps", [])),
     }
 
 
 @app.post("/api/runs")
-def start_run(payload: dict[str, Any]) -> dict[str, Any]:
+def start_run(
+    payload: dict[str, Any],
+    user: User | None = Depends(current_user_optional),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     scenario_file = payload.get("scenario_file")
     if not scenario_file:
         raise HTTPException(status_code=400, detail="scenario_file is required")
@@ -907,12 +1078,25 @@ def start_run(payload: dict[str, Any]) -> dict[str, Any]:
         if not payload.get("label"):
             label = "regression"
 
+    workspace_run = is_workspace_path(str(scenario_file))
+    if workspace_run and user is None:
+        raise HTTPException(status_code=401, detail="Sign in required")
+
     with tempfile.TemporaryDirectory(prefix="lti-run-") as tmp:
         tmp_dir = Path(tmp)
+        run_file = str(scenario_file)
+        overrides = payload.get("environment_overrides")
+        if not isinstance(overrides, dict):
+            overrides = {}
+        if workspace_run and user is not None:
+            run_file = str(materialize_workspace_run(db, user, str(scenario_file), tmp_dir))
+            suite_id, _filename = parse_workspace_path(str(scenario_file))
+            stored = load_suite_env_values(db, user, suite_id, scenario_environment)
+            overrides = {**stored, **{str(k): v for k, v in overrides.items()}}
         cmd = [
             str(BIN_DIR / "test.sh"),
             "--scheme", str(scheme),
-            "--scenario-file", scenario_file,
+            "--scenario-file", run_file,
             "--scenario-users", scenario_users,
             "--scenario-duration", scenario_duration,
             "--scenario-iterations", scenario_iterations,
@@ -926,7 +1110,6 @@ def start_run(payload: dict[str, Any]) -> dict[str, Any]:
         if regression:
             cmd.append("--regression")
 
-        overrides = payload.get("environment_overrides")
         if isinstance(overrides, dict) and overrides:
             extra_env_path = tmp_dir / "extra-env.json"
             extra_env_path.write_text(json.dumps(overrides), encoding="utf-8")
@@ -1030,6 +1213,19 @@ def test_step(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
         stop_cimd_metadata_servers()
+
+
+@app.post("/api/parse-curl")
+def parse_curl(payload: dict[str, Any]) -> dict[str, Any]:
+    text = str(payload.get("curl") or payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Paste a curl command")
+    try:
+        parsed = parse_curl_command(text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    parsed["status"] = "ok"
+    return parsed
 
 
 @app.post("/api/preview-step")

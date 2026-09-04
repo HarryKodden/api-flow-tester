@@ -19,8 +19,10 @@ COPY bin/ bin/
 COPY tools/ tools/
 COPY webapp/ webapp/
 COPY examples/ examples/
+COPY alembic.ini .
+COPY alembic/ alembic/
 
-RUN mkdir -p /app/results \
+RUN mkdir -p /app/results /app/data \
     && chmod +x /app/bin/test.sh
 
 ENV PYTHONUNBUFFERED=1 \

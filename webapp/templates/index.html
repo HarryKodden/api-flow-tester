@@ -26,6 +26,9 @@
         <div class="brand-sub">Suites, scenarios, one-pass runs</div>
       </div>
       <div class="topbar-actions">
+        <div id="auth-bar" class="auth-bar">
+          <button id="auth-toggle" class="ghost hidden" type="button">Sign in</button>
+        </div>
         <button id="theme-toggle" class="icon-btn theme-toggle" type="button" aria-label="Switch to light mode" title="Switch to light mode">
           <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <circle cx="12" cy="12" r="4"/>
@@ -45,11 +48,18 @@
             <header class="panel-head">
               <div>
                 <h2>Library</h2>
-                <p>Suites and scenarios</p>
+                <p>Browse the public library. New items go to your workspace.</p>
               </div>
               <div class="actions explorer-actions">
-                <button id="new-scenario" class="ghost" type="button" title="New test">New</button>
-                <button id="new-folder" class="ghost" type="button" title="New folder">Folder</button>
+                <div class="new-menu-wrap">
+                  <button id="new-item" class="ghost" type="button" aria-haspopup="menu" aria-expanded="false" title="Create in your workspace">New</button>
+                  <div id="new-item-menu" class="menu hidden" role="menu">
+                    <button type="button" role="menuitem" data-kind="folder">Folder</button>
+                    <button type="button" role="menuitem" data-kind="suite">Suite</button>
+                    <button type="button" role="menuitem" data-kind="scenario">Scenario</button>
+                    <p id="new-item-hint" class="menu-hint">Creates in My workspace</p>
+                  </div>
+                </div>
                 <button id="refresh-scenarios" class="ghost" type="button">Refresh</button>
               </div>
             </header>
@@ -65,6 +75,8 @@
                 <h2 id="editor-title">Suite</h2>
               </div>
               <div class="actions">
+                <button id="copy-suite" class="ghost hidden" type="button">Copy to workspace</button>
+                <button id="delete-suite" class="ghost danger-subtle hidden" type="button">Delete Suite</button>
                 <button id="save-suite" class="ghost" type="button">Save Suite</button>
               </div>
             </header>
@@ -93,9 +105,9 @@
                 <h4>Missing environment values</h4>
                 <button id="clear-session-env" type="button" class="ghost">Clear</button>
               </div>
-              <p class="muted">Empty, removed from the environment, still a template, or localhost. Enter a value. Kept for this browser session.</p>
+              <p id="session-env-help" class="muted">Empty, removed from the environment, still a template, or localhost. Enter a value. Library values stay in this browser session; workspace values are saved privately for this suite.</p>
               <div id="session-env-fields" class="env-dialog-fields"></div>
-              <p id="session-env-empty" class="muted">All required values are set in the selected environment.</p>
+              <p id="session-env-empty" class="muted">No environment values are required for the current steps.</p>
               <p id="session-env-run-hint" class="muted run-mode-hint">Run Tests stays disabled until every field has a value.</p>
             </div>
           </section>
@@ -110,7 +122,7 @@
             <div class="grid">
               <label>Label <input id="run-label" value="regression" /></label>
             </div>
-            <p id="run-target-hint" class="muted run-mode-hint">Host and port come from the selected suite environment.</p>
+            <p id="run-target-hint" class="muted run-mode-hint">An environment is only needed when steps use {{env}} values or a relative path.</p>
             <div class="actions row-end">
               <button id="regression-run" class="primary" type="button" disabled>Run Tests</button>
               <span id="run-spinner" class="run-spinner hidden" aria-hidden="true"></span>
@@ -152,6 +164,7 @@
                 <button id="import-scenario" class="ghost">Import Postman/Insomnia</button>
                 <input id="import-scenario-file" type="file" accept="application/json,text/yaml,application/x-yaml,.json,.yaml,.yml" class="hidden" />
                 <button id="add-step" class="ghost">Add Step</button>
+                <button id="delete-scenario" class="ghost danger-subtle hidden" type="button">Delete Scenario</button>
                 <button id="save-scenario" class="primary">Save Scenario</button>
               </div>
             </header>
@@ -181,6 +194,7 @@
                   <div class="step-curl-wrap">
                     <div class="lane-head">
                       <h4>curl</h4>
+                      <button id="import-step-curl" type="button" class="ghost">Import</button>
                       <button id="copy-step-curl" type="button" class="ghost" disabled>Copy</button>
                     </div>
                     <pre id="step-curl" class="console step-curl">Select a step to see curl.</pre>
@@ -198,10 +212,11 @@
                         <option>PUT</option>
                         <option>DELETE</option>
                         <option>PATCH</option>
+                        <option>HEAD</option>
                       </select>
                     </label>
-                    <label>Path
-                      <input id="step-path" placeholder="/api/users/me" />
+                    <label class="step-url-field">URL or path
+                      <input id="step-path" placeholder="https://api.example.com/users or /api/users/me" />
                       <span id="step-path-resolved" class="muted step-resolved"></span>
                     </label>
                     <label>Timeout (s) <input id="step-timeout" type="number" min="1" /></label>
@@ -228,6 +243,10 @@
                       <span class="json-field-flag" hidden>Set</span>
                     </button>
                   </div>
+                  <label class="toggle-row">
+                    <input id="step-follow-redirects" type="checkbox" />
+                    <span>Follow redirects</span>
+                  </label>
                   <label class="toggle-row">
                     <input id="step-stop-on-failure" type="checkbox" />
                     <span>Stop scenario iteration on failure</span>
@@ -260,6 +279,48 @@
         </div>
       </div>
     </main>
+
+    <div id="explorer-menu" class="menu explorer-menu hidden" role="menu"></div>
+
+    <div id="ask-dialog" class="json-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="ask-dialog-title">
+      <div class="json-dialog-backdrop" data-close="true"></div>
+      <div class="json-dialog-card ask-dialog-card">
+        <header class="modal-head section-head">
+          <div>
+            <h2 id="ask-dialog-title">Name</h2>
+            <p id="ask-dialog-help" class="muted"></p>
+          </div>
+          <button id="ask-dialog-cancel-top" type="button" class="icon-btn">Close</button>
+        </header>
+        <label id="ask-dialog-input-wrap">
+          <span class="hidden">Name</span>
+          <input id="ask-dialog-input" type="text" autocomplete="off" />
+        </label>
+        <div id="ask-dialog-list" class="picker-list hidden"></div>
+        <div class="actions row-end">
+          <button id="ask-dialog-cancel" type="button" class="ghost">Cancel</button>
+          <button id="ask-dialog-confirm" type="button" class="primary">Create</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="curl-dialog" class="json-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="curl-dialog-title">
+      <div class="json-dialog-backdrop" data-close="true"></div>
+      <div class="json-dialog-card ask-dialog-card">
+        <header class="modal-head section-head">
+          <div>
+            <h2 id="curl-dialog-title">Import curl</h2>
+            <p class="muted">Paste a curl command. Method, URL, headers, and body fill the selected step.</p>
+          </div>
+          <button id="curl-dialog-cancel-top" type="button" class="icon-btn">Close</button>
+        </header>
+        <textarea id="curl-dialog-editor" spellcheck="false" placeholder="curl -X POST 'https://api.example.com/users' -H 'Content-Type: application/json' --data-raw '{&quot;name&quot;:&quot;Ada&quot;}'"></textarea>
+        <div class="actions row-end">
+          <button id="curl-dialog-cancel" type="button" class="ghost">Cancel</button>
+          <button id="curl-dialog-apply" type="button" class="primary">Apply to Step</button>
+        </div>
+      </div>
+    </div>
 
     <div id="json-dialog" class="json-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="json-dialog-title">
       <div class="json-dialog-backdrop" data-close="true"></div>

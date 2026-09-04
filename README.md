@@ -6,6 +6,8 @@ The CLI entrypoint is still `bin/test.sh`. The product is a regression tester, n
 
 ## Features
 - Suite → scenario → step tests with payload templating and named environments
+- Public read-only library (`examples/demo`) plus a private workspace per signed-in user
+- OIDC sign-in (authorization code + PKCE) and PostgreSQL persistence
 - Web UI for browsing, editing, and running suites/scenarios
 - One-pass regression: one user, one iteration, fail on errors
 - Random data generators and named environments
@@ -19,7 +21,8 @@ The CLI entrypoint is still `bin/test.sh`. The product is a regression tester, n
 - `webapp/app.py` - FastAPI backend
 - `webapp/templates/` - frontend HTML
 - `webapp/static/` - frontend JS/CSS
-- `examples/` - suites and scenarios
+- `examples/` - public library suites (read-only in the UI)
+- `alembic/` - database migrations
 - `requirements.txt` - Python deps
 
 ## Quick Start
@@ -31,6 +34,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 chmod +x bin/test.sh
 ```
+
+Run the test suite:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+CI runs these tests on every push and pull request, then builds the container image only if they pass.
 
 Start the web frontend:
 
@@ -58,14 +70,35 @@ docker run --rm -p 9011:8080 ghcr.io/harrykodden/api-flow-tester:latest
 Then open `http://127.0.0.1:9011`.
 
 Current web UI capabilities:
-- browse suites from `examples/` (open a suite, then a scenario)
-- edit and save suite/scenario files from the browser
+- browse the public library under `examples/` (no sign-in required)
+- copy a library suite into a private workspace (sign-in required when OIDC is configured)
+- edit and save workspace suites, scenarios, and private per-suite environment values
 - build/edit scenarios with a block-based step lane and detailed step form
 - reorder steps with drag-and-drop tiles
 - test a selected step or the full sequence from the editor
 - run the open suite or scenario once (regression; no load-test knobs)
 - view live running state with spinner + disabled run button
 - read the last run’s pass/fail list (not persisted; no markdown report)
+
+### Database and sign-in
+
+The app image does not include a database. Set `DATABASE_URL` to PostgreSQL in production. If it is unset, the app uses SQLite under `data/app.db` for local work.
+
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | SQLAlchemy URL. Production: `postgresql+psycopg://user:pass@host:5432/db` |
+| `SESSION_SECRET` | Secret for the `aft_session` cookie |
+| `SESSION_SECURE` | Set `true` when serving over HTTPS. Ignored when `OIDC_REDIRECT_URI` is `http://` so local login cookies still work |
+| `OIDC_ISSUER` | Issuer URL (discovery at `/.well-known/openid-configuration`) |
+| `OIDC_CLIENT_ID` | Confidential or public client id |
+| `OIDC_CLIENT_SECRET` | Client secret (optional for public PKCE clients) |
+| `OIDC_REDIRECT_URI` | Must match the IdP, e.g. `http://127.0.0.1:9011/auth/callback` |
+
+OIDC uses authorization code + PKCE, scopes `openid profile email`, and an httpOnly `SameSite=Lax` session cookie. Users are stored by `issuer` + `sub`.
+
+If OIDC is not configured, the UI signs in as a local workspace user so Save / Import still persist to the database instead of `examples/`.
+
+Migrations run on startup (`alembic upgrade head`). Runs stay ephemeral and are not stored.
 
 Run a suite (one pass, fail on errors):
 
@@ -234,7 +267,7 @@ Environment values can also reference other keys in the same environment. Set a 
 
 `{{ server }}`, `{{ env.base_url }}`, and `{{ _.base_url }}` work the same way. Nested references are expanded (up to 10 passes); `vars.`, `random.`, and `meta.` placeholders are left for step rendering.
 
-If a referenced environment variable has no value, the Run panel lists it and **Run Tests** stays disabled until you fill it in. Those values are kept for the browser session and are not written back to the scenario file.
+If a referenced environment variable has no value, the Run panel lists it and **Run Tests** stays disabled until you fill it in. On a library suite those values stay in the browser session. After you copy the suite to your workspace they are stored privately per suite and environment, not inside the exportable suite JSON.
 
 The `server` key in an environment overrides `base_url` for URL construction. All other keys are available as template variables. After a host is chosen, `server` and `base_url` are both set so either name works in templates.
 

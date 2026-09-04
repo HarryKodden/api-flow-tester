@@ -23,6 +23,8 @@ from urllib.parse import quote, urlparse
 import requests
 from tools.oauth_helpers import (
     absolute_url,
+    is_same_origin_url,
+    resolve_redirect_url,
     basic_auth_header,
     form_encode,
     generate_pkce,
@@ -197,10 +199,6 @@ def resolve_base_url(scenario: dict[str, Any], selected_environment: str | None)
     env_values: dict[str, Any] = {}
     if isinstance(chosen_name, str) and isinstance(environments.get(chosen_name), dict):
         env_values = environments[chosen_name]
-    elif environments:
-        first_value = next(iter(environments.values()))
-        if isinstance(first_value, dict):
-            env_values = first_value
     env_values = expand_environment_values(dict(env_values), keys=CONNECTION_ENV_KEYS)
     for key in ("server", "base_url", "baseUrl", "url"):
         value = env_values.get(key)
@@ -215,9 +213,6 @@ def resolve_environment_values(scenario: dict[str, Any], selected_environment: s
     chosen_name = selected_environment or scenario.get("selected_environment")
     if isinstance(chosen_name, str) and isinstance(environments.get(chosen_name), dict):
         return dict(environments[chosen_name])
-    for value in environments.values():
-        if isinstance(value, dict):
-            return dict(value)
     return {}
 
 
@@ -725,7 +720,7 @@ def smart_follow(
             latency_ms = (time.perf_counter() - started) * 1000
             return last_response, current_url, latency_ms
 
-        next_url = absolute_url(current_url, location)
+        next_url = resolve_redirect_url(current_url, location)
         host = urlparse(next_url).hostname or ""
         path = urlparse(next_url).path or ""
         has_auth_code = bool(query_param(next_url, "code"))
@@ -922,7 +917,23 @@ def run_http_step(
             final_url = response.url
             loc = response.headers.get("Location")
             if loc and response.status_code in (301, 302, 303, 307, 308):
-                final_url = absolute_url(url, loc)
+                next_url = resolve_redirect_url(url, loc)
+                final_url = next_url
+                expected = to_status_list(step.get("expected_status"))
+                wants_redirect = bool(expected) and response.status_code in expected
+                if not wants_redirect and is_same_origin_url(url, next_url):
+                    response, final_url, extra_ms = smart_follow(
+                        session=session,
+                        method="GET" if response.status_code in (302, 303) else method,
+                        url=next_url,
+                        headers=headers,
+                        payload_json=None if response.status_code in (302, 303) else payload_json,
+                        payload_data=None if response.status_code in (302, 303) else payload_data,
+                        timeout=timeout,
+                        max_redirects=max_redirects,
+                        stop_hosts=list(stop_hosts),
+                    )
+                    latency_ms += extra_ms
         except requests.RequestException as exc:
             latency_ms = (time.perf_counter() - started) * 1000
             return False, True, latency_ms, None, None, None, f"{exc.__class__.__name__}: {exc}"

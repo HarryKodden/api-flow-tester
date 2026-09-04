@@ -13,7 +13,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -136,6 +136,19 @@ def absolute_url(base_url: str, path_or_url: str) -> str:
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
         return path_or_url
     return f"{base_url.rstrip('/')}{path_or_url if path_or_url.startswith('/') else '/' + path_or_url}"
+
+
+def resolve_redirect_url(current_url: str, location: str) -> str:
+    loc = str(location or "").strip()
+    if loc.startswith("http://") or loc.startswith("https://"):
+        return loc
+    return urljoin(str(current_url or ""), loc)
+
+
+def is_same_origin_url(left: str, right: str) -> bool:
+    first = urlparse(left)
+    second = urlparse(right)
+    return bool(first.netloc) and (first.scheme, first.netloc) == (second.scheme, second.netloc)
 
 
 class _JSONHandler(BaseHTTPRequestHandler):

@@ -8,6 +8,9 @@ const suitePanel = document.getElementById('suite-panel');
 const suiteSection = document.getElementById('suite-section');
 const scenarioSection = document.getElementById('scenario-section');
 const saveSuiteButton = document.getElementById('save-suite');
+const copySuiteButton = document.getElementById('copy-suite');
+const deleteSuiteButton = document.getElementById('delete-suite');
+const deleteScenarioButton = document.getElementById('delete-scenario');
 const suiteMemberCount = document.getElementById('suite-member-count');
 const suiteDescription = document.getElementById('suite-description');
 const suiteMembers = document.getElementById('suite-members');
@@ -43,6 +46,7 @@ const editStepHeadersJsonButton = document.getElementById('edit-step-headers-jso
 const editStepJsonButton = document.getElementById('edit-step-json');
 const editStepSaveJsonButton = document.getElementById('edit-step-save-json');
 const editStepExpectedJsonButton = document.getElementById('edit-step-expected-json');
+const stepFollowRedirectsInput = document.getElementById('step-follow-redirects');
 const stepStopOnFailureInput = document.getElementById('step-stop-on-failure');
 const stepMoveUpButton = document.getElementById('step-move-up');
 const stepMoveDownButton = document.getElementById('step-move-down');
@@ -52,6 +56,9 @@ const testSequenceButton = document.getElementById('test-sequence');
 const sequenceTestOutput = document.getElementById('sequence-test-output');
 const stepCurlOutput = document.getElementById('step-curl');
 const copyStepCurlButton = document.getElementById('copy-step-curl');
+const importStepCurlButton = document.getElementById('import-step-curl');
+const curlDialog = document.getElementById('curl-dialog');
+const curlDialogEditor = document.getElementById('curl-dialog-editor');
 const regressionRunButton = document.getElementById('regression-run');
 const scenarioBaseUrlWrap = document.getElementById('scenario-base-url-wrap');
 const runTargetHint = document.getElementById('run-target-hint');
@@ -88,6 +95,40 @@ let stepCurlTimer = null;
 let stepCurlGeneration = 0;
 let lastHydratedCurlKey = '';
 let lastCopiedCurl = '';
+let authState = {authenticated: false, oidc_enabled: false, user: null};
+let loadedWorkspaceEnvKey = '';
+let envPersistTimer = null;
+let explorerDrag = null;
+let askDialogResolver = null;
+let askDialogValue = '';
+
+function isWorkspacePath(path) {
+  return String(path || '').replaceAll('\\', '/').replace(/^\.\//, '').startsWith('workspace/');
+}
+
+function isWorkspaceFolderPath(path) {
+  const raw = String(path || '');
+  return raw === 'workspace' || raw.startsWith('ws-folder/');
+}
+
+function isSuiteFileName(path) {
+  return String(path || '').split('/').pop() === 'suite.json';
+}
+
+function workspaceSuiteId(path) {
+  const parts = String(path || '').replaceAll('\\', '/').split('/').filter(Boolean);
+  return parts[0] === 'workspace' && parts[1] ? parts[1] : '';
+}
+
+function workspaceFilePath(suiteId, filename) {
+  return `workspace/${suiteId}/${filename}`;
+}
+
+function requireSignInMessage() {
+  return authState.oidc_enabled
+    ? 'Sign in to save or import into your workspace.'
+    : 'A workspace user is required.';
+}
 
 async function api(path, options = {}) {
   const {headers: extraHeaders, cache: _ignoredCache, ...rest} = options;
@@ -98,9 +139,14 @@ async function api(path, options = {}) {
   }
   const response = await fetch(url, {
     cache: 'no-store',
+    credentials: 'same-origin',
     headers: {'Content-Type': 'application/json', ...extraHeaders},
     ...rest,
   });
+  if (response.status === 401 && authState.oidc_enabled) {
+    window.location.href = '/login';
+    throw new Error('Sign in required');
+  }
   if (!response.ok) {
     const body = await response.text();
     throw new Error(body || `Request failed: ${response.status}`);
@@ -122,7 +168,17 @@ function joinPath(...parts) {
 }
 
 function scenarioFileUrl(path) {
+  if (isWorkspacePath(path)) {
+    return `/api/workspace/file?path=${encodeURIComponent(path)}`;
+  }
   return `/api/scenarios/file?path=${encodeURIComponent(path)}`;
+}
+
+function parentSuiteUrl(path) {
+  if (isWorkspacePath(path)) {
+    return `/api/workspace/parent-suite?path=${encodeURIComponent(path)}`;
+  }
+  return `/api/scenarios/parent-suite?path=${encodeURIComponent(path)}`;
 }
 
 function expandAncestorFolders(filePath) {
@@ -137,6 +193,9 @@ function expandAncestorFolders(filePath) {
 function expandFolderPath(folderPath) {
   if (!folderPath) {
     return;
+  }
+  if (isWorkspaceFolderPath(folderPath) || String(folderPath).startsWith('ws-folder/')) {
+    expandedFolders.add('workspace');
   }
   const parts = folderPath.split('/').filter(Boolean);
   let current = '';
@@ -157,7 +216,10 @@ function collectFolderPaths(nodes, into = new Set()) {
 }
 
 function isSuiteNode(node) {
-  return Boolean(node && (node.kind === 'suite' || (node.member_count || 0) > 0));
+  if (!node || node.type === 'dir') {
+    return false;
+  }
+  return node.kind === 'suite' || (node.member_count || 0) > 0 || isSuiteFileName(node.path);
 }
 
 function findFirstSuiteFile(nodes) {
@@ -185,7 +247,79 @@ function svgIcon(name) {
   if (name === 'suite') {
     return '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M3 3.5h10v2H3v-2zm0 3.5h10v2H3V7zm0 3.5h10V13H3v-2z"/></svg>';
   }
+  if (name === 'more') {
+    return '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M3 8.75A1.25 1.25 0 1 1 3 6.25 1.25 1.25 0 0 1 3 8.75zm5 0A1.25 1.25 0 1 1 8 6.25 1.25 1.25 0 0 1 8 8.75zm5 0A1.25 1.25 0 1 1 13 6.25 1.25 1.25 0 0 1 13 8.75z"/></svg>';
+  }
   return '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M4.5 2A1.5 1.5 0 0 0 3 3.5v9A1.5 1.5 0 0 0 4.5 14h7A1.5 1.5 0 0 0 13 12.5V6.2c0-.4-.16-.78-.44-1.06l-2.7-2.7A1.5 1.5 0 0 0 8.8 2H4.5z"/></svg>';
+}
+
+function findTreeNode(path, nodes = scenarioTree?.children) {
+  for (const node of nodes || []) {
+    if (node.path === path) {
+      return node;
+    }
+    if (node.type === 'dir') {
+      const nested = findTreeNode(path, node.children);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+  return null;
+}
+
+function collectSuiteNodes(nodes = scenarioTree?.children, into = []) {
+  for (const node of nodes || []) {
+    if (node.type === 'dir') {
+      collectSuiteNodes(node.children, into);
+    } else if (isSuiteNode(node)) {
+      into.push(node);
+    }
+  }
+  return into;
+}
+
+function folderPathForSuite(node) {
+  if (!node) {
+    return 'workspace';
+  }
+  if (isWorkspacePath(node.path)) {
+    return node.folder ? `ws-folder/${node.folder}` : 'workspace';
+  }
+  return parentFolderPath(node.path) || 'examples';
+}
+
+function explorerCreateContext() {
+  const selected = findTreeNode(selectedFolderPath);
+  const openSuite = findTreeNode(activeSuitePath) || findTreeNode(selectedScenarioName);
+  let folderPath = 'workspace';
+  if (selected && selected.type === 'dir' && selected.source === 'workspace') {
+    folderPath = selected.path;
+  } else if (openSuite && isSuiteNode(openSuite) && isWorkspacePath(openSuite.path)) {
+    folderPath = folderPathForSuite(openSuite);
+  }
+  const folderNode = findTreeNode(folderPath);
+  const suitePath = openSuite && isSuiteNode(openSuite) && isWorkspacePath(openSuite.path)
+    ? openSuite.path
+    : (activeSuitePath && isWorkspacePath(activeSuitePath) ? activeSuitePath : '');
+  const suiteNode = suitePath ? findTreeNode(suitePath) : null;
+  return {
+    folderPath,
+    folderLabel: folderNode?.name || 'My workspace',
+    suitePath,
+    suiteLabel: suiteNode?.name || fileLabel(suitePath),
+  };
+}
+
+function updateNewMenuHint() {
+  const hint = document.getElementById('new-item-hint');
+  if (!hint) {
+    return;
+  }
+  const ctx = explorerCreateContext();
+  hint.textContent = ctx.suitePath
+    ? `Suite/folder in ${ctx.folderLabel}. Scenario in ${ctx.suiteLabel}.`
+    : `Creates in ${ctx.folderLabel}`;
 }
 
 function renderExplorer() {
@@ -194,17 +328,118 @@ function renderExplorer() {
   if (nodes.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'file-explorer-empty';
-    empty.textContent = 'No suites yet. Save a suite.json in a folder to get started.';
+    empty.textContent = 'No suites yet. Open the public library or copy a suite into your workspace.';
     scenarioList.appendChild(empty);
     return;
   }
-  renderTreeNodes(scenarioList, nodes, 0);
+  renderTreeNodes(scenarioList, nodes, 0, '');
+  updateNewMenuHint();
 }
 
-function renderTreeNodes(container, nodes, depth) {
+function stopRowGesture(event) {
+  event.stopPropagation();
+}
+
+function moreButton(target) {
+  if (explorerMenuItems(target).length === 0) {
+    return document.createTextNode('');
+  }
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'tree-more';
+  button.title = 'Actions';
+  button.setAttribute('aria-label', 'Actions');
+  button.draggable = false;
+  button.innerHTML = svgIcon('more');
+  button.addEventListener('pointerdown', stopRowGesture);
+  button.addEventListener('mousedown', stopRowGesture);
+  button.addEventListener('click', (event) => {
+    stopRowGesture(event);
+    showExplorerMenu(event, target, button);
+  });
+  return button;
+}
+
+function bindRowMenu(row, target) {
+  row.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    selectedFolderPath = target.kind === 'folder' ? target.path : target.parent || selectedFolderPath;
+    showExplorerMenu(event, target);
+  });
+}
+
+function bindRowDrag(row, target, handle) {
+  if (!target.draggable || !handle) {
+    return;
+  }
+  row.classList.add('is-draggable');
+  handle.draggable = true;
+  handle.addEventListener('dragstart', (event) => {
+    explorerDrag = target;
+    row.classList.add('dragging');
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', target.path);
+  });
+  handle.addEventListener('dragend', () => {
+    explorerDrag = null;
+    scenarioList.querySelectorAll('.tree-row.dragging, .tree-row.drag-over, .tree-row.drop-folder').forEach((item) => {
+      item.classList.remove('dragging', 'drag-over', 'drop-folder');
+    });
+  });
+}
+
+function bindRowDrop(row, target) {
+  row.addEventListener('dragover', (event) => {
+    if (!explorerDrag || explorerDrag.path === target.path) {
+      return;
+    }
+    const canReorder = explorerDrag.kind === target.kind && explorerDrag.parent === target.parent && explorerDrag.draggable;
+    const canMoveSuite = explorerDrag.kind === 'suite' && target.kind === 'folder' && target.source === 'workspace' && isWorkspacePath(explorerDrag.path);
+    const canMoveFolder = explorerDrag.kind === 'folder' && target.kind === 'folder' && target.source === 'workspace' && explorerDrag.source === 'workspace' && explorerDrag.path !== target.path && !String(target.path).startsWith(`${explorerDrag.path}/`);
+    if (!canReorder && !canMoveSuite && !canMoveFolder) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    row.classList.toggle('drop-folder', canMoveSuite || canMoveFolder);
+    row.classList.toggle('drag-over', canReorder && !canMoveSuite && !canMoveFolder);
+  });
+  row.addEventListener('dragleave', () => {
+    row.classList.remove('drag-over', 'drop-folder');
+  });
+  row.addEventListener('drop', (event) => {
+    event.preventDefault();
+    row.classList.remove('drag-over', 'drop-folder');
+    if (!explorerDrag || explorerDrag.path === target.path) {
+      return;
+    }
+    if (explorerDrag.kind === 'folder' && target.kind === 'folder' && target.source === 'workspace') {
+      void moveFolderToFolder(explorerDrag.path, target.path);
+      return;
+    }
+    if (explorerDrag.kind === 'suite' && target.kind === 'folder' && target.source === 'workspace') {
+      void moveSuiteToFolder(explorerDrag.path, target.path);
+      return;
+    }
+    if (explorerDrag.kind === target.kind && explorerDrag.parent === target.parent) {
+      void reorderDropped(explorerDrag, target);
+    }
+  });
+}
+
+function renderTreeNodes(container, nodes, depth, parentPath) {
   nodes.forEach((node) => {
     if (node.type === 'dir') {
       const expanded = expandedFolders.has(node.path);
+      const workspaceFolder = node.source === 'workspace' && node.path.startsWith('ws-folder/');
+      const target = {
+        kind: 'folder',
+        path: node.path,
+        name: node.name,
+        parent: parentPath,
+        source: node.source || 'library',
+        draggable: workspaceFolder,
+      };
       const row = document.createElement('div');
       row.className = `tree-row${node.path === selectedFolderPath ? ' folder-selected' : ''}`;
       row.style.paddingLeft = `${8 + depth * 14}px`;
@@ -216,6 +451,8 @@ function renderTreeNodes(container, nodes, depth) {
       chevron.innerHTML = svgIcon('chevron');
       chevron.style.transform = expanded ? 'rotate(90deg)' : 'rotate(0deg)';
       chevron.setAttribute('aria-label', expanded ? 'Collapse folder' : 'Expand folder');
+      chevron.addEventListener('pointerdown', stopRowGesture);
+      chevron.addEventListener('mousedown', stopRowGesture);
       chevron.addEventListener('click', (event) => {
         event.stopPropagation();
         if (expandedFolders.has(node.path)) {
@@ -234,16 +471,19 @@ function renderTreeNodes(container, nodes, depth) {
       label.className = 'tree-label';
       label.textContent = node.name;
 
-      row.append(chevron, icon, label);
+      row.append(chevron, icon, label, moreButton(target));
       row.addEventListener('click', () => {
         selectedFolderPath = node.path;
         expandedFolders.add(node.path);
         renderExplorer();
       });
+      bindRowMenu(row, target);
+      bindRowDrag(row, target, label);
+      bindRowDrop(row, target);
       container.appendChild(row);
 
       if (expanded) {
-        renderTreeNodes(container, node.children || [], depth + 1);
+        renderTreeNodes(container, node.children || [], depth + 1, node.path);
       }
       return;
     }
@@ -253,6 +493,16 @@ function renderTreeNodes(container, nodes, depth) {
     }
     const expanded = expandedSuites.has(node.path);
     const selected = node.path === selectedScenarioName || node.path === activeSuitePath;
+    const parent = node.source === 'workspace' ? folderPathForSuite(node) : parentPath;
+    const target = {
+      kind: 'suite',
+      path: node.path,
+      name: node.name,
+      parent,
+      source: node.source || (isWorkspacePath(node.path) ? 'workspace' : 'library'),
+      folder: node.folder || '',
+      draggable: isWorkspacePath(node.path),
+    };
     const row = document.createElement('div');
     row.className = `tree-row kind-suite${selected ? ' selected' : ''}`;
     row.style.paddingLeft = `${8 + depth * 14}px`;
@@ -264,15 +514,17 @@ function renderTreeNodes(container, nodes, depth) {
     chevron.innerHTML = svgIcon('chevron');
     chevron.style.transform = expanded ? 'rotate(90deg)' : 'rotate(0deg)';
     chevron.setAttribute('aria-label', expanded ? 'Collapse suite' : 'Expand suite');
-    chevron.addEventListener('click', (event) => {
-      event.stopPropagation();
-      if (expandedSuites.has(node.path)) {
-        expandedSuites.delete(node.path);
-      } else {
-        expandedSuites.add(node.path);
-      }
-      renderExplorer();
-    });
+      chevron.addEventListener('pointerdown', stopRowGesture);
+      chevron.addEventListener('mousedown', stopRowGesture);
+      chevron.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (expandedSuites.has(node.path)) {
+          expandedSuites.delete(node.path);
+        } else {
+          expandedSuites.add(node.path);
+        }
+        renderExplorer();
+      });
 
     const icon = document.createElement('span');
     icon.className = 'tree-icon';
@@ -292,11 +544,15 @@ function renderTreeNodes(container, nodes, depth) {
     meta.textContent = `${count}`;
     meta.title = `${count} scenario${count === 1 ? '' : 's'}`;
 
-    row.append(chevron, icon, kind, label, meta);
+    row.append(chevron, icon, kind, label, meta, moreButton(target));
     row.addEventListener('click', () => {
+      selectedFolderPath = folderPathForSuite(node);
       expandedSuites.add(node.path);
       void openScenario(node);
     });
+    bindRowMenu(row, target);
+    bindRowDrag(row, target, label);
+    bindRowDrop(row, target);
     container.appendChild(row);
 
     if (!expanded) {
@@ -305,8 +561,15 @@ function renderTreeNodes(container, nodes, depth) {
     const folder = parentFolderPath(node.path);
     (node.members || []).forEach((memberName) => {
       const memberPath = joinPath(folder, memberName);
-      const memberRow = document.createElement('button');
-      memberRow.type = 'button';
+      const memberTarget = {
+        kind: 'scenario',
+        path: memberPath,
+        name: memberName,
+        parent: node.path,
+        source: target.source,
+        draggable: isWorkspacePath(node.path),
+      };
+      const memberRow = document.createElement('div');
       memberRow.className = `tree-row kind-scenario${memberPath === selectedScenarioName ? ' selected' : ''}`;
       memberRow.style.paddingLeft = `${8 + (depth + 1) * 14 + 22}px`;
       memberRow.title = memberPath;
@@ -323,10 +586,13 @@ function renderTreeNodes(container, nodes, depth) {
       memberLabel.className = 'tree-label';
       memberLabel.textContent = fileLabel(memberName);
 
-      memberRow.append(memberIcon, memberKind, memberLabel);
+      memberRow.append(memberIcon, memberKind, memberLabel, moreButton(memberTarget));
       memberRow.addEventListener('click', () => {
         void openSuiteMember(node, memberName);
       });
+      bindRowMenu(memberRow, memberTarget);
+      bindRowDrag(memberRow, memberTarget, memberLabel);
+      bindRowDrop(memberRow, memberTarget);
       container.appendChild(memberRow);
     });
   });
@@ -431,8 +697,7 @@ function getSelectedEnvironmentName() {
   if (suiteSelected && environments[suiteSelected]) {
     return suiteSelected;
   }
-  const names = Object.keys(environments);
-  return names[0] || '';
+  return '';
 }
 
 const CONNECTION_ENV_KEYS = new Set(['server', 'base_url', 'baseUrl', 'url', 'mock_provider']);
@@ -665,10 +930,53 @@ function setSessionEnvOverride(name, value) {
     delete current[name];
   }
   saveSessionEnvOverrides(current);
+  scheduleWorkspaceEnvPersist();
 }
 
 function clearSessionEnvOverrides() {
   saveSessionEnvOverrides({});
+  scheduleWorkspaceEnvPersist();
+}
+
+function scheduleWorkspaceEnvPersist() {
+  if (!isWorkspacePath(activeSuitePath || selectedScenarioName || '')) {
+    return;
+  }
+  clearTimeout(envPersistTimer);
+  envPersistTimer = setTimeout(() => {
+    void persistWorkspaceEnvValues();
+  }, 400);
+}
+
+async function persistWorkspaceEnvValues() {
+  const suiteId = workspaceSuiteId(activeSuitePath || selectedScenarioName || '');
+  const environment = getSelectedEnvironmentName();
+  if (!suiteId || !environment || !authState.authenticated) {
+    return;
+  }
+  await api(`/api/workspace/suites/${encodeURIComponent(suiteId)}/env`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      environment,
+      values: environmentOverridesPayload(),
+    }),
+  });
+}
+
+async function loadWorkspaceEnvValues() {
+  const suiteId = workspaceSuiteId(activeSuitePath || selectedScenarioName || '');
+  const environment = getSelectedEnvironmentName();
+  const key = `${suiteId}::${environment || '_'}`;
+  if (!suiteId || !authState.authenticated) {
+    return;
+  }
+  if (key === loadedWorkspaceEnvKey) {
+    return;
+  }
+  const data = await api(`/api/workspace/suites/${encodeURIComponent(suiteId)}/env?environment=${encodeURIComponent(environment)}`);
+  saveSessionEnvOverrides(data.values || {});
+  loadedWorkspaceEnvKey = key;
+  lastRequiredEnvNames = '';
 }
 
 function applySessionEnvOverrides(env) {
@@ -807,8 +1115,7 @@ function missingEnvDependencies(applySession) {
   if (applySession) {
     env = applyEncodedCompanions(expandEnvironmentValues(applySessionEnvOverrides(env)));
   }
-  const refs = collectEnvRefs(env);
-  collectEnvRefs(currentScenario?.steps || [], refs);
+  const refs = collectEnvRefs(currentScenario?.steps || []);
   const present = applySession ? isConcreteEnvValue : isAssignedEnvValue;
   return [...refs].filter((path) => {
     let resolved = lookupEnvPath(env, path);
@@ -822,15 +1129,31 @@ function missingEnvDependencies(applySession) {
   }).sort();
 }
 
+function isNonHttpStep(step) {
+  const method = String(step?.method || 'GET').toUpperCase();
+  return method === 'PREPARE' || method === 'SLEEP' || method === 'EXEC';
+}
+
+function stepsNeedSharedBaseUrl(steps) {
+  const list = Array.isArray(steps) ? steps : (currentScenario?.steps || []);
+  return list.some((step) => {
+    if (isNonHttpStep(step)) {
+      return false;
+    }
+    const path = String(step?.path || step?.url || '').trim();
+    return !isAbsoluteHttpUrl(path);
+  });
+}
+
 function connectionKeysNeedingValues(env) {
-  const refs = collectEnvRefs(env);
-  collectEnvRefs(currentScenario?.steps || [], refs);
+  const refs = collectEnvRefs(currentScenario?.steps || []);
   const scenarioBase = (currentScenario?.base_url || '').trim();
+  const needsSharedHost = stepsNeedSharedBaseUrl();
   return [...CONNECTION_ENV_KEYS].filter((key) => {
     const exists = Object.prototype.hasOwnProperty.call(env, key);
     const referenced = refs.has(key);
     const fromScenarioBase = key === 'base_url' && Boolean(scenarioBase);
-    if (!exists && !referenced && !fromScenarioBase) {
+    if (!referenced && !fromScenarioBase && !(exists && needsSharedHost)) {
       return false;
     }
     const value = exists
@@ -858,7 +1181,6 @@ function requiredEnvironmentNames() {
   return [...new Set([
     ...missingEnvDependencies(false),
     ...loopbackConnectionKeys(false),
-    ...unsetEnvironmentKeys(false),
   ])].sort();
 }
 
@@ -866,7 +1188,6 @@ function unsatisfiedEnvironmentNames() {
   return [...new Set([
     ...missingEnvDependencies(true),
     ...loopbackConnectionKeys(true),
-    ...unsetEnvironmentKeys(true),
   ])].sort();
 }
 
@@ -1090,12 +1411,37 @@ function viewingSuite() {
   return isSuiteScenario(currentScenario);
 }
 
+function stepAbsoluteOrigin(step) {
+  const raw = String(step?.path || step?.url || '').trim();
+  if (!isAbsoluteHttpUrl(raw)) {
+    return '';
+  }
+  try {
+    return new URL(expandEnvPlaceholders(raw)).origin;
+  } catch {
+    return '';
+  }
+}
+
+function requestBaseUrl() {
+  const resolved = getResolvedBaseUrl();
+  const raw = resolved.includes('://') ? resolved : (resolved ? `http://${resolved}` : '');
+  const parsed = raw ? parseRunUrl(raw) : null;
+  if (parsed?.host) {
+    const implicit = (parsed.scheme === 'https' && parsed.port === 443) || (parsed.scheme === 'http' && parsed.port === 80);
+    return implicit ? `${parsed.scheme}://${parsed.host}` : `${parsed.scheme}://${parsed.host}:${parsed.port}`;
+  }
+  const step = getSelectedStep() || (currentScenario?.steps || [])[0];
+  return stepAbsoluteOrigin(step);
+}
+
 function getRunTarget() {
-  const fromScenario = parseRunUrl(getResolvedBaseUrl() || '');
+  const fromUrl = requestBaseUrl();
+  const fromScenario = parseRunUrl(fromUrl || '');
   return {
     scheme: fromScenario?.scheme || 'http',
     host: fromScenario?.host || '',
-    port: fromScenario?.port || 8080,
+    port: fromScenario?.port || (fromScenario?.scheme === 'https' ? 443 : 80),
   };
 }
 
@@ -1105,21 +1451,23 @@ function updateRunTargetHint() {
   }
   const target = getRunTarget();
   if (!target.host) {
-    runTargetHint.textContent = 'Set server to an IP or FQDN (not localhost).';
+    runTargetHint.textContent = stepsNeedSharedBaseUrl()
+      ? 'Select an environment with a server URL, or put a full URL on each step.'
+      : 'No environment selected. That is fine until a step needs {{env}} values or a relative path.';
     return;
   }
   if (isForbiddenApiHost(target.host)) {
     runTargetHint.textContent = ROUTABLE_HOST_HELP;
     return;
   }
-  const url = `${target.scheme}://${target.host}:${target.port}`;
-  if (viewingSuite()) {
-    const envName = getSelectedEnvironmentName();
-    if (!envName) {
-      runTargetHint.textContent = 'Select a suite environment. Host and port come from that environment’s server URL.';
-      return;
-    }
+  const url = requestBaseUrl();
+  const envName = getSelectedEnvironmentName();
+  if (viewingSuite() && envName) {
     runTargetHint.textContent = `Using “${envName}” from the suite editor → ${url}`;
+    return;
+  }
+  if (envName) {
+    runTargetHint.textContent = `Requests go to ${url} using “${envName}”.`;
     return;
   }
   runTargetHint.textContent = `Requests go to ${url}.`;
@@ -1387,12 +1735,19 @@ function renderStepDetail() {
   testStepButton.disabled = false;
 
   stepNameInput.value = step.name || '';
-  stepMethodInput.value = step.method || 'GET';
-  stepPathInput.value = step.path || '';
+  ensureMethodOption(step.method || 'GET');
+  stepMethodInput.value = (step.method || 'GET').toUpperCase();
+  stepPathInput.value = step.path || step.url || '';
   if (stepPathResolved) {
-    const resolved = expandEnvPlaceholders(step.path || step.url || '');
     const raw = step.path || step.url || '';
-    stepPathResolved.textContent = resolved && resolved !== raw ? resolved : '';
+    const resolved = expandEnvPlaceholders(raw);
+    if (isAbsoluteHttpUrl(raw)) {
+      stepPathResolved.textContent = resolved !== raw
+        ? resolved
+        : 'Full URL — the suite base URL is not applied.';
+    } else {
+      stepPathResolved.textContent = resolved && resolved !== raw ? resolved : '';
+    }
   }
   stepTimeoutInput.value = step.timeout ?? '';
   stepExpectedStatusInput.value = formatExpectedStatus(step.expected_status);
@@ -1401,6 +1756,9 @@ function renderStepDetail() {
   syncJsonFieldButton(editStepJsonButton, step.json);
   syncJsonFieldButton(editStepSaveJsonButton, step.save);
   syncJsonFieldButton(editStepExpectedJsonButton, step.expected_json_contains);
+  if (stepFollowRedirectsInput) {
+    stepFollowRedirectsInput.checked = Boolean(step.follow_redirects);
+  }
   stepStopOnFailureInput.checked = Boolean(step.stop_on_failure);
   scheduleStepCurlPreview();
 }
@@ -1435,7 +1793,7 @@ function getJsonDialogConfig(target) {
         }
         const names = Object.keys(next);
         if (!names.includes(currentScenario.selected_environment || '')) {
-          currentScenario.selected_environment = names[0] || '';
+          currentScenario.selected_environment = '';
         }
         if (activeSuiteDocument && names.includes(currentScenario.selected_environment || '')) {
           activeSuiteDocument.selected_environment = currentScenario.selected_environment;
@@ -1537,25 +1895,70 @@ function closeJsonDialog() {
   jsonDialogEditor.setCustomValidity('');
 }
 
+async function clonePathToWorkspace(path) {
+  if (!path) {
+    throw new Error('Open a suite first');
+  }
+  if (isWorkspacePath(path)) {
+    return {path, id: workspaceSuiteId(path)};
+  }
+  if (!authState.authenticated) {
+    throw new Error(requireSignInMessage());
+  }
+  return api('/api/workspace/clone', {
+    method: 'POST',
+    body: JSON.stringify({path}),
+  });
+}
+
+async function ensureWorkspaceSuiteId() {
+  if (isWorkspacePath(activeSuitePath)) {
+    return workspaceSuiteId(activeSuitePath);
+  }
+  if (activeSuitePath) {
+    const cloned = await clonePathToWorkspace(activeSuitePath);
+    activeSuitePath = cloned.path;
+    return cloned.id;
+  }
+  if (!authState.authenticated) {
+    throw new Error(requireSignInMessage());
+  }
+  const created = await api('/api/workspace/suites', {
+    method: 'POST',
+    body: JSON.stringify({name: 'Untitled'}),
+  });
+  activeSuitePath = created.path;
+  return created.id;
+}
+
 async function saveScenarioIfNamed() {
   const name = scenarioNameInput.value.trim();
   if (!name || !currentScenario) {
     return;
   }
+  if (isSuiteScenario(currentScenario)) {
+    return;
+  }
+  const suiteId = await ensureWorkspaceSuiteId();
+  const filename = name.split('/').pop() || name;
+  const path = workspaceFilePath(suiteId, filename);
   const payload = getValidatedScenarioPayload();
-  await api(scenarioFileUrl(name), {
+  const result = await api(scenarioFileUrl(path), {
     method: 'POST',
     body: JSON.stringify(payload),
   });
   currentScenario = payload;
-  selectedScenarioName = name;
+  selectedScenarioName = result.path || path;
+  scenarioNameInput.value = selectedScenarioName;
 }
 
 async function persistActiveSuiteDocument() {
-  if (!activeSuitePath || !activeSuiteDocument || isSuiteScenario(currentScenario)) {
+  if (!activeSuiteDocument) {
     return;
   }
-  const suite = await api(scenarioFileUrl(activeSuitePath));
+  const suiteId = await ensureWorkspaceSuiteId();
+  const path = workspaceFilePath(suiteId, 'suite.json');
+  const suite = await api(scenarioFileUrl(path));
   if (!suite || typeof suite !== 'object') {
     return;
   }
@@ -1564,10 +1967,14 @@ async function persistActiveSuiteDocument() {
   if (activeSuiteDocument.selected_environment) {
     suite.selected_environment = activeSuiteDocument.selected_environment;
   }
-  await api(scenarioFileUrl(activeSuitePath), {
+  if (activeSuiteDocument.description != null) {
+    suite.description = activeSuiteDocument.description;
+  }
+  await api(scenarioFileUrl(path), {
     method: 'POST',
     body: JSON.stringify(suite),
   });
+  activeSuitePath = path;
 }
 
 function openJsonDialog(target) {
@@ -1643,6 +2050,100 @@ function addStep() {
   currentScenario.steps.push(createEmptyStep());
   selectedStepIndex = currentScenario.steps.length - 1;
   renderScenarioBuilder();
+}
+
+function isAbsoluteHttpUrl(value) {
+  return /^https?:\/\//i.test(String(value || '').trim());
+}
+
+function ensureMethodOption(method) {
+  const value = String(method || 'GET').toUpperCase() || 'GET';
+  if (stepMethodInput && ![...stepMethodInput.options].some((option) => option.value === value)) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = value;
+    stepMethodInput.appendChild(option);
+  }
+  return value;
+}
+
+function openCurlDialog() {
+  if (!getSelectedStep() || !curlDialog) {
+    alert('Select a step first');
+    return;
+  }
+  if (curlDialogEditor) {
+    curlDialogEditor.value = '';
+  }
+  curlDialog.classList.remove('hidden');
+  window.setTimeout(() => curlDialogEditor?.focus(), 0);
+}
+
+function closeCurlDialog() {
+  curlDialog?.classList.add('hidden');
+}
+
+function applyParsedCurl(parsed) {
+  const step = getSelectedStep();
+  if (!step || !parsed) {
+    return;
+  }
+  const method = ensureMethodOption(parsed.method || 'GET');
+  step.method = method;
+  const path = String(parsed.path || parsed.url || '').trim();
+  if (path) {
+    step.path = path;
+    delete step.url;
+  }
+  if (parsed.headers && typeof parsed.headers === 'object' && Object.keys(parsed.headers).length) {
+    step.headers = parsed.headers;
+  } else {
+    delete step.headers;
+  }
+  if (Object.prototype.hasOwnProperty.call(parsed, 'json')) {
+    step.json = parsed.json;
+    delete step.data;
+  } else if (parsed.data !== undefined && parsed.data !== null && parsed.data !== '') {
+    step.data = parsed.data;
+    delete step.json;
+  } else {
+    delete step.json;
+    delete step.data;
+  }
+  if (parsed.timeout) {
+    step.timeout = parsed.timeout;
+  }
+  if (parsed.follow_redirects) {
+    step.follow_redirects = true;
+  } else {
+    delete step.follow_redirects;
+  }
+  if ((!step.name || step.name === 'new_step') && parsed.name) {
+    step.name = parsed.name;
+  }
+  lastHydratedCurlKey = '';
+  renderScenarioBuilder();
+}
+
+async function applyCurlDialog() {
+  const text = (curlDialogEditor?.value || '').trim();
+  if (!text) {
+    alert('Paste a curl command');
+    return;
+  }
+  try {
+    const parsed = await api('/api/parse-curl', {
+      method: 'POST',
+      body: JSON.stringify({curl: text}),
+    });
+    applyParsedCurl(parsed);
+    closeCurlDialog();
+    if (runOutput) {
+      runOutput.textContent = `Imported curl into ${getSelectedStep()?.name || 'the selected step'}.`;
+    }
+  } catch (error) {
+    alert(error.message || String(error));
+  }
 }
 
 function bindStepField(element, updater) {
@@ -1752,7 +2253,10 @@ async function loadScenarios() {
   }
 }
 
-function isSuiteScenario(scenario) {
+function isSuiteScenario(scenario, path = selectedScenarioName || activeSuitePath) {
+  if (isSuiteFileName(path)) {
+    return true;
+  }
   return Array.isArray(scenario?.scenarios) && scenario.scenarios.length > 0 && (!Array.isArray(scenario.steps) || scenario.steps.length === 0);
 }
 
@@ -1766,6 +2270,7 @@ function captureActiveSuiteDocument(scenario) {
     return;
   }
   activeSuiteDocument = {
+    name: scenario.name || '',
     environments: scenario.environments || {},
     random_generators: scenario.random_generators || {},
     selected_environment: scenario.selected_environment || '',
@@ -1806,7 +2311,22 @@ function renderHierarchy() {
   }
   if (editorTitle) {
     const suitePath = activeSuitePath || (viewingSuite ? selectedScenarioName : '');
-    editorTitle.textContent = suitePath ? fileLabel(suitePath) : 'Suite';
+    editorTitle.textContent = currentScenario?.name || activeSuiteDocument?.name || (suitePath ? fileLabel(suitePath) : 'Suite');
+  }
+  if (copySuiteButton) {
+    const openPath = activeSuitePath || selectedScenarioName || '';
+    const canCopy = Boolean(openPath) && hasSuite && authState.authenticated;
+    copySuiteButton.classList.toggle('hidden', !canCopy || isWorkspacePath(openPath));
+    copySuiteButton.textContent = 'Copy to workspace';
+  }
+  if (deleteSuiteButton) {
+    const suitePath = activeSuitePath || (viewingSuite ? selectedScenarioName : '');
+    deleteSuiteButton.classList.toggle('hidden', !suitePath || !authState.authenticated);
+  }
+  if (deleteScenarioButton) {
+    const scenarioPath = selectedScenarioName || '';
+    const showScenarioDelete = Boolean(scenarioPath) && !viewingSuite && authState.authenticated;
+    deleteScenarioButton.classList.toggle('hidden', !showScenarioDelete);
   }
   if (runTitle) {
     runTitle.textContent = 'Run';
@@ -1932,7 +2452,9 @@ function renderSuiteMembers() {
       : (activeSuiteDocument?.description || '');
     suiteDescription.textContent = text || 'This suite runs the listed scenarios in order.';
   }
-  const folder = parentFolderPath((viewingSuite ? selectedScenarioName : activeSuitePath) || '');
+  const suitePath = (viewingSuite ? selectedScenarioName : activeSuitePath) || '';
+  const folder = parentFolderPath(suitePath);
+  const canReorder = isWorkspacePath(suitePath);
   members.forEach((name, index) => {
     const fileName = String(name);
     const memberPath = joinPath(folder, fileName);
@@ -1940,6 +2462,36 @@ function renderSuiteMembers() {
     button.type = 'button';
     button.className = `suite-member${memberPath === selectedScenarioName ? ' is-current' : ''}`;
     button.innerHTML = `<span>${index + 1}. ${escapeHtml(fileLabel(fileName))}</span><span class="tree-kind">Scenario</span>`;
+    if (canReorder) {
+      button.draggable = true;
+      button.addEventListener('dragstart', (event) => {
+        explorerDrag = {kind: 'scenario', path: memberPath, parent: suitePath, draggable: true};
+        button.classList.add('dragging');
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', memberPath);
+      });
+      button.addEventListener('dragend', () => {
+        explorerDrag = null;
+        suiteMembers.querySelectorAll('.suite-member.dragging, .suite-member.drag-over').forEach((item) => {
+          item.classList.remove('dragging', 'drag-over');
+        });
+      });
+      button.addEventListener('dragover', (event) => {
+        if (!explorerDrag || explorerDrag.path === memberPath || explorerDrag.parent !== suitePath) {
+          return;
+        }
+        event.preventDefault();
+        button.classList.add('drag-over');
+      });
+      button.addEventListener('dragleave', () => button.classList.remove('drag-over'));
+      button.addEventListener('drop', (event) => {
+        event.preventDefault();
+        button.classList.remove('drag-over');
+        if (explorerDrag) {
+          void reorderDropped(explorerDrag, {kind: 'scenario', path: memberPath, parent: suitePath});
+        }
+      });
+    }
     button.addEventListener('click', () => {
       void openScenario({path: memberPath, name: fileName}, {fromSuite: true});
     });
@@ -1962,7 +2514,8 @@ async function openSuiteMember(suiteNode, memberName) {
 async function openScenario(item, options = {}) {
   const scenario = await api(scenarioFileUrl(item.path));
   selectedScenarioName = item.path;
-  selectedFolderPath = parentFolderPath(item.path);
+  const suiteNode = isSuiteNode(item) ? item : findTreeNode(activeSuitePath);
+  selectedFolderPath = suiteNode ? folderPathForSuite(suiteNode) : parentFolderPath(item.path);
   expandAncestorFolders(item.path);
   scenarioNameInput.value = item.path;
   currentScenario = normalizeScenario(scenario);
@@ -1980,7 +2533,7 @@ async function openScenario(item, options = {}) {
   }
   if (!isSuiteScenario(currentScenario) && !options.fromSuite) {
     try {
-      const inherited = await api(`/api/scenarios/parent-suite?path=${encodeURIComponent(item.path)}`);
+      const inherited = await api(parentSuiteUrl(item.path));
       if (inherited?.status === 'ok' && inherited.environments) {
         activeSuitePath = inherited.path || '';
         activeSuiteMembers = Array.isArray(inherited.scenarios) ? inherited.scenarios : [];
@@ -1997,6 +2550,14 @@ async function openScenario(item, options = {}) {
     }
   }
   persistLastOpen();
+  if (isWorkspacePath(activeSuitePath || item.path)) {
+    loadedWorkspaceEnvKey = '';
+    try {
+      await loadWorkspaceEnvValues();
+    } catch {
+      // Workspace env is optional; missing-values panel still works from session storage.
+    }
+  }
   renderExplorer();
   renderScenarioBuilder();
 }
@@ -2004,29 +2565,36 @@ async function openScenario(item, options = {}) {
 async function saveSuite() {
   try {
     if (isSuiteScenario(currentScenario)) {
-      const name = activeSuitePath || selectedScenarioName;
-      if (!name) {
+      const sourcePath = activeSuitePath || selectedScenarioName;
+      if (!sourcePath) {
         alert('Open a suite first');
         return;
       }
+      const suiteId = isWorkspacePath(sourcePath)
+        ? workspaceSuiteId(sourcePath)
+        : (await clonePathToWorkspace(sourcePath)).id;
+      const path = workspaceFilePath(suiteId, 'suite.json');
       const parsed = getValidatedScenarioPayload();
-      await api(scenarioFileUrl(name), {
+      await api(scenarioFileUrl(path), {
         method: 'POST',
         body: JSON.stringify(parsed),
       });
       currentScenario = parsed;
-      selectedScenarioName = name;
-      selectedFolderPath = parentFolderPath(name);
+      selectedScenarioName = path;
+      activeSuitePath = path;
+      selectedFolderPath = parentFolderPath(path);
       captureActiveSuiteDocument(currentScenario);
+      await persistWorkspaceEnvValues();
       await loadScenarios();
       if (runOutput) {
-        runOutput.textContent = 'Suite saved.';
+        runOutput.textContent = 'Suite saved to your workspace.';
       }
       return;
     }
     await persistActiveSuiteDocument();
+    await persistWorkspaceEnvValues();
     if (runOutput) {
-      runOutput.textContent = 'Suite saved.';
+      runOutput.textContent = 'Suite saved to your workspace.';
     }
   } catch (error) {
     alert(error.message || String(error));
@@ -2040,56 +2608,691 @@ async function saveScenario() {
     return;
   }
   try {
-    const parsed = getValidatedScenarioPayload();
-    await api(scenarioFileUrl(name), {
-      method: 'POST',
-      body: JSON.stringify(parsed),
-    });
-    currentScenario = parsed;
-    selectedScenarioName = name;
-    selectedFolderPath = parentFolderPath(name);
-    expandAncestorFolders(name);
+    await saveScenarioIfNamed();
+    selectedFolderPath = parentFolderPath(selectedScenarioName || name);
+    expandAncestorFolders(selectedScenarioName || name);
+    await persistWorkspaceEnvValues();
     await loadScenarios();
     renderExplorer();
-    runOutput.textContent = 'Scenario saved.';
+    runOutput.textContent = 'Scenario saved to your workspace.';
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+async function copyOpenSuiteToWorkspace() {
+  const source = activeSuitePath || selectedScenarioName;
+  const cloned = await clonePathToWorkspace(source);
+  expandedFolders.add('workspace');
+  expandedSuites.add(cloned.path);
+  await loadScenarios();
+  await reopenScenarioFile(cloned.path);
+  if (runOutput) {
+    runOutput.textContent = 'Copied to your workspace.';
+  }
+}
+
+function resetOpenDocuments() {
+  selectedScenarioName = null;
+  selectedFolderPath = '';
+  activeSuitePath = '';
+  activeSuiteMembers = [];
+  activeSuiteDocument = null;
+  currentScenario = null;
+  selectedStepIndex = -1;
+  lastStepContextVars = {};
+  lastHydratedCurlKey = '';
+  loadedWorkspaceEnvKey = '';
+}
+
+async function deletePath(path) {
+  return api(`/api/workspace/item?path=${encodeURIComponent(path)}`, {method: 'DELETE'});
+}
+
+async function deleteOpenSuite() {
+  const path = activeSuitePath || selectedScenarioName;
+  if (!path) {
+    alert('Open a suite first');
+    return;
+  }
+  const label = currentScenario?.name || activeSuiteDocument?.name || fileLabel(path);
+  if (!window.confirm(`Delete suite “${label}”? This cannot be undone.`)) {
+    return;
+  }
+  try {
+    await deletePath(isWorkspacePath(path) ? workspaceFilePath(workspaceSuiteId(path), 'suite.json') : path);
+    resetOpenDocuments();
+    await loadScenarios();
+    if (runOutput) {
+      runOutput.textContent = 'Suite deleted.';
+    }
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+async function deleteOpenScenario() {
+  const path = selectedScenarioName;
+  if (!path || isSuiteScenario(currentScenario)) {
+    alert('Open a scenario first');
+    return;
+  }
+  const label = fileLabel(path);
+  if (!window.confirm(`Delete scenario “${label}”? This cannot be undone.`)) {
+    return;
+  }
+  try {
+    const result = await deletePath(path);
+    selectedScenarioName = null;
+    currentScenario = null;
+    selectedStepIndex = -1;
+    await loadScenarios();
+    const suitePath = result.suite_path || activeSuitePath;
+    if (suitePath) {
+      await reopenScenarioFile(suitePath);
+    }
+    if (runOutput) {
+      runOutput.textContent = 'Scenario deleted.';
+    }
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+async function copyOpenSuite() {
+  try {
+    const source = activeSuitePath || selectedScenarioName;
+    if (!source) {
+      alert('Open a suite first');
+      return;
+    }
+    if (isWorkspacePath(source)) {
+      alert('This suite is already in your workspace.');
+      return;
+    }
+    if (!authState.authenticated) {
+      throw new Error(requireSignInMessage());
+    }
+    await copyOpenSuiteToWorkspace();
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+function closeExplorerMenu() {
+  const menu = document.getElementById('explorer-menu');
+  if (menu) {
+    menu.classList.add('hidden');
+    menu.innerHTML = '';
+    delete menu.dataset.path;
+  }
+}
+
+function closeNewMenu() {
+  const menu = document.getElementById('new-item-menu');
+  const button = document.getElementById('new-item');
+  if (menu) {
+    menu.classList.add('hidden');
+  }
+  if (button) {
+    button.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function toggleNewMenu() {
+  if (!authState.authenticated) {
+    alert(requireSignInMessage());
+    return;
+  }
+  const menu = document.getElementById('new-item-menu');
+  const button = document.getElementById('new-item');
+  if (!menu || !button) {
+    return;
+  }
+  const open = menu.classList.contains('hidden');
+  closeExplorerMenu();
+  if (open) {
+    updateNewMenuHint();
+    menu.classList.remove('hidden');
+    button.setAttribute('aria-expanded', 'true');
+  } else {
+    closeNewMenu();
+  }
+}
+
+function showExplorerMenu(event, target, anchor) {
+  const menu = document.getElementById('explorer-menu');
+  if (!menu) {
+    return;
+  }
+  const items = explorerMenuItems(target);
+  if (items.length === 0) {
+    return;
+  }
+  if (menu.dataset.path === target.path && !menu.classList.contains('hidden')) {
+    closeExplorerMenu();
+    return;
+  }
+  closeNewMenu();
+  menu.innerHTML = '';
+  menu.dataset.path = target.path;
+  items.forEach((item) => {
+    if (item.separator) {
+      const sep = document.createElement('div');
+      sep.className = 'menu-sep';
+      sep.textContent = item.label || '';
+      menu.appendChild(sep);
+      return;
+    }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute('role', 'menuitem');
+    button.textContent = item.label;
+    if (item.danger) {
+      button.classList.add('is-danger');
+    }
+    button.addEventListener('click', () => {
+      closeExplorerMenu();
+      void item.action();
+    });
+    menu.appendChild(button);
+  });
+  menu.classList.remove('hidden');
+  const rect = (anchor || event.currentTarget)?.getBoundingClientRect?.();
+  const left = rect ? rect.right - menu.offsetWidth : event.clientX;
+  const top = rect ? rect.bottom + 4 : event.clientY;
+  menu.style.left = `${Math.min(Math.max(8, left), window.innerWidth - menu.offsetWidth - 8)}px`;
+  menu.style.top = `${Math.min(Math.max(8, top), window.innerHeight - menu.offsetHeight - 8)}px`;
+}
+
+function explorerMenuItems(target) {
+  const items = [];
+  if (target.kind === 'folder') {
+    if (target.source === 'workspace') {
+      items.push({label: 'New suite', action: () => createExplorerItem('suite', target.path)});
+      items.push({label: 'New folder', action: () => createExplorerItem('folder', target.path)});
+      if (target.path.startsWith('ws-folder/')) {
+        items.push({label: 'Rename', action: () => renameExplorerItem(target)});
+        items.push({separator: true, label: 'Order'});
+        items.push({label: 'Move up', action: () => reorderByDelta('folders', target.parent || 'workspace', target.path, -1)});
+        items.push({label: 'Move down', action: () => reorderByDelta('folders', target.parent || 'workspace', target.path, 1)});
+        items.push({separator: true});
+        items.push({label: 'Delete folder', danger: true, action: () => deleteExplorerFolder(target)});
+      }
+    }
+    return items;
+  }
+  if (target.kind === 'suite') {
+    if (isWorkspacePath(target.path)) {
+      items.push({label: 'New scenario', action: () => createExplorerItem('scenario', target.path)});
+      items.push({label: 'Rename', action: () => renameExplorerItem(target)});
+      items.push({separator: true, label: 'Order'});
+      items.push({label: 'Move up', action: () => reorderByDelta('suites', target.parent, target.path, -1)});
+      items.push({label: 'Move down', action: () => reorderByDelta('suites', target.parent, target.path, 1)});
+      items.push({separator: true});
+      items.push({label: 'Delete suite', danger: true, action: () => deleteExplorerSuite(target.path)});
+    } else {
+      items.push({label: 'Copy to workspace', action: () => copySuitePath(target.path)});
+    }
+    return items;
+  }
+  items.push({label: 'Copy to another suite…', action: () => copyScenarioToSuite(target.path, target.parent)});
+  if (isWorkspacePath(target.path)) {
+    items.push({label: 'Rename', action: () => renameExplorerItem(target)});
+    items.push({separator: true, label: 'Order'});
+    items.push({label: 'Move up', action: () => reorderByDelta('scenarios', target.parent, target.path, -1)});
+    items.push({label: 'Move down', action: () => reorderByDelta('scenarios', target.parent, target.path, 1)});
+    items.push({separator: true});
+    items.push({label: 'Delete scenario', danger: true, action: () => deleteExplorerScenario(target.path)});
+  }
+  return items;
+}
+
+function siblingPaths(kind, parent) {
+  if (kind === 'folders') {
+    return (findTreeNode(parent)?.children || []).filter((node) => node.type === 'dir').map((node) => node.path);
+  }
+  if (kind === 'suites') {
+    return (findTreeNode(parent)?.children || []).filter((node) => isSuiteNode(node)).map((node) => node.path);
+  }
+  const suite = findTreeNode(parent);
+  const folder = parentFolderPath(parent);
+  return (suite?.members || []).map((name) => joinPath(folder, name));
+}
+
+function movePath(items, path, deltaOrBefore) {
+  const next = items.slice();
+  const from = next.indexOf(path);
+  if (from < 0) {
+    return null;
+  }
+  if (typeof deltaOrBefore === 'number') {
+    const to = from + deltaOrBefore;
+    if (to < 0 || to >= next.length) {
+      return null;
+    }
+    const [taken] = next.splice(from, 1);
+    next.splice(to, 0, taken);
+    return next;
+  }
+  const before = next.indexOf(deltaOrBefore);
+  if (before < 0) {
+    return null;
+  }
+  const [taken] = next.splice(from, 1);
+  const insertAt = next.indexOf(deltaOrBefore);
+  next.splice(insertAt, 0, taken);
+  return next;
+}
+
+async function persistOrder(kind, parent, items) {
+  await api('/api/explorer/reorder', {
+    method: 'POST',
+    body: JSON.stringify({kind, parent, items}),
+  });
+  await loadScenarios();
+}
+
+async function reorderByDelta(kind, parent, path, delta) {
+  const next = movePath(siblingPaths(kind, parent), path, delta);
+  if (!next) {
+    return;
+  }
+  try {
+    await persistOrder(kind, parent, next);
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+async function reorderDropped(source, target) {
+  const kind = source.kind === 'folder' ? 'folders' : source.kind === 'suite' ? 'suites' : 'scenarios';
+  const next = movePath(siblingPaths(kind, source.parent), source.path, target.path);
+  if (!next) {
+    return;
+  }
+  try {
+    await persistOrder(kind, source.parent, next);
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+async function moveSuiteToFolder(path, destination) {
+  try {
+    await api('/api/explorer/move-suite', {
+      method: 'POST',
+      body: JSON.stringify({path, destination}),
+    });
+    expandFolderPath(destination);
+    await loadScenarios();
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+async function moveFolderToFolder(path, destination) {
+  try {
+    const moved = await api('/api/explorer/move-folder', {
+      method: 'POST',
+      body: JSON.stringify({path, destination}),
+    });
+    expandFolderPath(moved.path || destination);
+    selectedFolderPath = moved.path || destination;
+    await loadScenarios();
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+function closeAskDialog(value) {
+  const dialog = document.getElementById('ask-dialog');
+  if (dialog) {
+    dialog.classList.add('hidden');
+  }
+  const resolve = askDialogResolver;
+  askDialogResolver = null;
+  if (resolve) {
+    resolve(value);
+  }
+}
+
+function askUser({title, help = '', value = '', confirmLabel = 'OK', options = null}) {
+  const dialog = document.getElementById('ask-dialog');
+  const titleEl = document.getElementById('ask-dialog-title');
+  const helpEl = document.getElementById('ask-dialog-help');
+  const input = document.getElementById('ask-dialog-input');
+  const inputWrap = document.getElementById('ask-dialog-input-wrap');
+  const list = document.getElementById('ask-dialog-list');
+  const confirm = document.getElementById('ask-dialog-confirm');
+  if (!dialog || !input) {
+    return Promise.resolve(window.prompt(title, value));
+  }
+  return new Promise((resolve) => {
+    askDialogResolver = resolve;
+    titleEl.textContent = title;
+    helpEl.textContent = help;
+    helpEl.classList.toggle('hidden', !help);
+    confirm.textContent = confirmLabel;
+    askDialogValue = options?.[0]?.value || value || '';
+    input.value = value;
+    if (options) {
+      inputWrap.classList.add('hidden');
+      list.classList.remove('hidden');
+      list.innerHTML = '';
+      if (options.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'muted';
+        empty.textContent = 'Copy a suite into your workspace first.';
+        list.appendChild(empty);
+      }
+      options.forEach((option) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `picker-item${option.value === askDialogValue ? ' is-active' : ''}`;
+        button.textContent = option.label;
+        button.addEventListener('click', () => {
+          askDialogValue = option.value;
+          list.querySelectorAll('.picker-item').forEach((el) => el.classList.toggle('is-active', el === button));
+        });
+        list.appendChild(button);
+      });
+    } else {
+      inputWrap.classList.remove('hidden');
+      list.classList.add('hidden');
+      list.innerHTML = '';
+    }
+    dialog.classList.remove('hidden');
+    window.setTimeout(() => {
+      if (!options) {
+        input.focus();
+        input.select();
+      }
+    }, 0);
+  });
+}
+
+async function createExplorerItem(kind, explicitTarget) {
+  if (!authState.authenticated) {
+    alert(requireSignInMessage());
+    return;
+  }
+  const ctx = explorerCreateContext();
+  if (kind === 'scenario' && !explicitTarget && !ctx.suitePath) {
+    const suiteName = await askUser({
+      title: 'New suite',
+      help: 'No workspace suite is selected, so a suite will be created first.',
+      value: 'Untitled',
+      confirmLabel: 'Continue',
+    });
+    if (!suiteName) {
+      return;
+    }
+    const scenarioName = await askUser({
+      title: 'New scenario',
+      value: 'new_scenario',
+      confirmLabel: 'Create',
+    });
+    if (!scenarioName) {
+      return;
+    }
+    try {
+      const suite = await api('/api/explorer/create', {
+        method: 'POST',
+        body: JSON.stringify({kind: 'suite', name: suiteName, target: ctx.folderPath}),
+      });
+      const created = await api('/api/explorer/create', {
+        method: 'POST',
+        body: JSON.stringify({kind: 'scenario', name: scenarioName, target: suite.path}),
+      });
+      expandedFolders.add(ctx.folderPath);
+      expandedSuites.add(suite.path);
+      await loadScenarios();
+      await reopenScenarioFile(created.path, {fromSuite: true});
+    } catch (error) {
+      alert(error.message || String(error));
+    }
+    return;
+  }
+  const folderTarget = (explicitTarget && isWorkspaceFolderPath(explicitTarget))
+    ? explicitTarget
+    : ctx.folderPath;
+  const folderLabel = findTreeNode(folderTarget)?.name || ctx.folderLabel || 'My workspace';
+  const defaults = {
+    folder: {title: 'New folder', value: 'folder', help: `Adds a folder in ${folderLabel}.`},
+    suite: {title: 'New suite', value: 'Untitled', help: `Adds a suite in ${folderLabel}.`},
+    scenario: {title: 'New scenario', value: 'new_scenario', help: `Adds a scenario to ${fileLabel(explicitTarget || ctx.suiteLabel)}.`},
+  };
+  const name = await askUser({...defaults[kind], confirmLabel: 'Create'});
+  if (!name) {
+    return;
+  }
+  const target = kind === 'scenario'
+    ? (explicitTarget || ctx.suitePath)
+    : folderTarget;
+  try {
+    const created = await api('/api/explorer/create', {
+      method: 'POST',
+      body: JSON.stringify({kind, name, target}),
+    });
+    if (kind === 'folder') {
+      selectedFolderPath = created.path;
+      expandFolderPath(created.path);
+      expandFolderPath(target);
+      await loadScenarios();
+      return;
+    }
+    if (kind === 'suite') {
+      expandedFolders.add(target);
+      expandedSuites.add(created.path);
+      await loadScenarios();
+      await reopenScenarioFile(created.path);
+      return;
+    }
+    expandedSuites.add(created.suite_path || target);
+    await loadScenarios();
+    if (created.suite_path) {
+      await reopenScenarioFile(created.suite_path);
+    }
+    await reopenScenarioFile(created.path, {fromSuite: true});
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+async function copyScenarioToSuite(source, currentSuitePath) {
+  if (!authState.authenticated) {
+    alert(requireSignInMessage());
+    return;
+  }
+  const options = collectSuiteNodes()
+    .filter((node) => isWorkspacePath(node.path) && node.path !== currentSuitePath)
+    .map((node) => ({
+      value: node.path,
+      label: node.folder ? `${node.folder} / ${node.name}` : node.name,
+    }));
+  const destination = await askUser({
+    title: 'Copy scenario',
+    help: options.length ? 'Choose a workspace suite.' : '',
+    confirmLabel: 'Copy',
+    options,
+  });
+  if (!destination) {
+    return;
+  }
+  try {
+    const copied = await api('/api/explorer/copy-scenario', {
+      method: 'POST',
+      body: JSON.stringify({source, destination}),
+    });
+    expandedSuites.add(copied.suite_path || destination);
+    await loadScenarios();
+    await reopenScenarioFile(copied.suite_path || destination);
+    await reopenScenarioFile(copied.path, {fromSuite: true});
+    if (runOutput) {
+      runOutput.textContent = 'Scenario copied.';
+    }
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+async function copySuitePath(path) {
+  try {
+    if (!authState.authenticated) {
+      throw new Error(requireSignInMessage());
+    }
+    if (isWorkspacePath(path)) {
+      throw new Error('This suite is already in your workspace.');
+    }
+    const cloned = await clonePathToWorkspace(path);
+    expandedFolders.add('workspace');
+    expandedSuites.add(cloned.path);
+    await loadScenarios();
+    await reopenScenarioFile(cloned.path);
+    if (runOutput) {
+      runOutput.textContent = 'Copied to your workspace.';
+    }
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+function rewriteExplorerPath(value, oldPath, newPath) {
+  const current = String(value || '');
+  if (!oldPath || !newPath || current === '') {
+    return current;
+  }
+  if (current === oldPath) {
+    return newPath;
+  }
+  if (current.startsWith(`${oldPath}/`)) {
+    return `${newPath}${current.slice(oldPath.length)}`;
+  }
+  return current;
+}
+
+function rewritePathSet(store, oldPath, newPath) {
+  if (!store || !oldPath || !newPath || oldPath === newPath) {
+    return;
+  }
+  const next = [...store].map((path) => rewriteExplorerPath(path, oldPath, newPath));
+  store.clear();
+  next.forEach((path) => store.add(path));
+}
+
+async function renameExplorerItem(target) {
+  if (!authState.authenticated) {
+    alert(requireSignInMessage());
+    return;
+  }
+  const current = target.kind === 'scenario' ? fileLabel(target.name) : target.name;
+  const name = await askUser({
+    title: `Rename ${target.kind}`,
+    value: current,
+    confirmLabel: 'Rename',
+  });
+  if (!name || name === current) {
+    return;
+  }
+  try {
+    const renamed = await api('/api/explorer/rename', {
+      method: 'POST',
+      body: JSON.stringify({path: target.path, name}),
+    });
+    if (target.kind === 'folder') {
+      rewritePathSet(expandedFolders, target.path, renamed.path);
+      selectedFolderPath = rewriteExplorerPath(selectedFolderPath, target.path, renamed.path);
+    }
+    if (target.kind === 'scenario') {
+      if (selectedScenarioName === target.path) {
+        selectedScenarioName = renamed.path;
+        if (scenarioNameInput) {
+          scenarioNameInput.value = renamed.path;
+        }
+        if (currentScenario) {
+          currentScenario.name = fileLabel(renamed.name || name);
+        }
+      }
+    }
+    if (target.kind === 'suite') {
+      if (activeSuiteDocument) {
+        activeSuiteDocument.name = renamed.name;
+      }
+      if (currentScenario && isSuiteScenario(currentScenario) && (activeSuitePath === target.path || selectedScenarioName === target.path)) {
+        currentScenario.name = renamed.name;
+      }
+    }
+    await loadScenarios();
+    if (renamed.kind === 'suite') {
+      if (activeSuitePath === renamed.path || selectedScenarioName === renamed.path) {
+        await reopenScenarioFile(renamed.path);
+      }
+    } else if (renamed.kind === 'scenario' && selectedScenarioName === renamed.path) {
+      await reopenScenarioFile(renamed.path, {fromSuite: true});
+    }
+    if (runOutput) {
+      runOutput.textContent = `Renamed to ${renamed.name}.`;
+    }
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+async function deleteExplorerFolder(target) {
+  if (!window.confirm(`Delete folder “${target.name}”? It must be empty.`)) {
+    return;
+  }
+  try {
+    await api(`/api/explorer/folder?path=${encodeURIComponent(target.path)}`, {method: 'DELETE'});
+    if (selectedFolderPath === target.path) {
+      selectedFolderPath = 'workspace';
+    }
+    await loadScenarios();
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+async function deleteExplorerSuite(path) {
+  const label = findTreeNode(path)?.name || fileLabel(path);
+  if (!window.confirm(`Delete suite “${label}”? This cannot be undone.`)) {
+    return;
+  }
+  try {
+    await deletePath(isWorkspacePath(path) ? workspaceFilePath(workspaceSuiteId(path), 'suite.json') : path);
+    if (activeSuitePath === path || selectedScenarioName === path) {
+      resetOpenDocuments();
+    }
+    await loadScenarios();
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+async function deleteExplorerScenario(path) {
+  const label = fileLabel(path);
+  if (!window.confirm(`Delete scenario “${label}”? This cannot be undone.`)) {
+    return;
+  }
+  try {
+    const result = await deletePath(path);
+    if (selectedScenarioName === path) {
+      selectedScenarioName = null;
+      currentScenario = null;
+      selectedStepIndex = -1;
+    }
+    await loadScenarios();
+    if (result.suite_path) {
+      await reopenScenarioFile(result.suite_path);
+    }
   } catch (error) {
     alert(error.message || String(error));
   }
 }
 
 function startNewScenario() {
-  const prefix = selectedFolderPath ? `${selectedFolderPath}/` : '';
-  selectedScenarioName = null;
-  scenarioNameInput.value = `${prefix}new_scenario.json`;
-  currentScenario = createEmptyScenario();
-  lastStepContextVars = {};
-  lastHydratedCurlKey = '';
-  activeSuitePath = '';
-  activeSuiteMembers = [];
-  activeSuiteDocument = null;
-  selectedStepIndex = -1;
-  renderExplorer();
-  renderScenarioBuilder();
-}
-
-async function createFolder() {
-  const name = window.prompt('Folder name');
-  if (!name || !name.trim()) {
-    return;
-  }
-  const path = joinPath(selectedFolderPath, name.trim());
-  try {
-    const result = await api('/api/scenarios/folders', {
-      method: 'POST',
-      body: JSON.stringify({path}),
-    });
-    selectedFolderPath = result.path;
-    expandFolderPath(result.path);
-    await loadScenarios();
-    renderExplorer();
-  } catch (error) {
-    alert(error.message || String(error));
-  }
+  void createExplorerItem('scenario');
 }
 
 async function importScenarioFromFile(file) {
@@ -2109,8 +3312,13 @@ async function importScenarioFromFile(file) {
   runOutput.textContent = 'Importing scenario...';
 
   try {
-    const response = await fetch('/api/scenarios/import/file', {
+    const suiteId = workspaceSuiteId(activeSuitePath);
+    const importUrl = suiteId
+      ? `/api/scenarios/import/file?suite_id=${encodeURIComponent(suiteId)}`
+      : '/api/scenarios/import/file';
+    const response = await fetch(importUrl, {
       method: 'POST',
+      credentials: 'same-origin',
       body: form,
     });
 
@@ -2123,9 +3331,6 @@ async function importScenarioFromFile(file) {
     scenarioNameInput.value = result.name;
     selectedScenarioName = result.name;
     currentScenario = normalizeScenario(result.scenario || {});
-    if (!currentScenario.selected_environment) {
-      currentScenario.selected_environment = Object.keys(currentScenario.environments || {})[0] || '';
-    }
     selectedStepIndex = currentScenario.steps.length > 0 ? 0 : -1;
     renderScenarioBuilder();
     await loadScenarios();
@@ -2269,7 +3474,7 @@ function withActiveSuite(payload) {
   if (activeSuiteDocument) {
     payload.suite = activeSuiteDocument;
   }
-  if (selectedScenarioName) {
+  if (selectedScenarioName && !isWorkspacePath(selectedScenarioName)) {
     payload.scenario_file = `./examples/${selectedScenarioName}`;
   }
   return payload;
@@ -2280,7 +3485,7 @@ function stepCurlPayload(hydratePrior) {
   return withActiveSuite({
     scenario: currentScenario,
     step_index: selectedStepIndex,
-    base_url: `${target.scheme}://${target.host}:${target.port}`,
+    base_url: requestBaseUrl(),
     selected_environment: getSelectedEnvironmentName(),
     environment_overrides: environmentOverridesPayload(),
     context_vars: lastStepContextVars,
@@ -2358,10 +3563,9 @@ async function copyStepCurl() {
 }
 
 function sequenceTestPayload() {
-  const target = getRunTarget();
   return withActiveSuite({
     scenario: currentScenario,
-    base_url: `${target.scheme}://${target.host}:${target.port}`,
+    base_url: requestBaseUrl(),
     selected_environment: getSelectedEnvironmentName(),
     environment_overrides: environmentOverridesPayload(),
   });
@@ -2407,7 +3611,6 @@ async function testSelectedStep() {
     renderTestStepResult('Set every required environment value before testing a step.');
     return;
   }
-  const target = getRunTarget();
   testStepButton.disabled = true;
   renderTestStepResult('Testing selected step...');
   try {
@@ -2416,7 +3619,7 @@ async function testSelectedStep() {
       body: JSON.stringify(withActiveSuite({
         scenario: currentScenario,
         step_index: selectedStepIndex,
-        base_url: `${target.scheme}://${target.host}:${target.port}`,
+        base_url: requestBaseUrl(),
         selected_environment: getSelectedEnvironmentName(),
         environment_overrides: environmentOverridesPayload(),
       })),
@@ -2449,17 +3652,12 @@ async function startRun() {
     return;
   }
 
-  if (!getSelectedEnvironmentName()) {
-    alert('Select an environment on the suite.');
-    return;
-  }
-
   const {scheme, host, port: inferredPort} = getRunTarget();
-  if (!host) {
-    alert('Set server in the suite environment to an IP or FQDN.');
+  if (stepsNeedSharedBaseUrl() && !host) {
+    alert('Select an environment with a server URL, or put a full URL on each step.');
     return;
   }
-  if (isForbiddenApiHost(host)) {
+  if (host && isForbiddenApiHost(host)) {
     alert(ROUTABLE_HOST_HELP);
     return;
   }
@@ -2490,7 +3688,7 @@ async function startRun() {
   }, 500);
 
   const payload = {
-    scenario_file: `./examples/${runFile}`,
+    scenario_file: isWorkspacePath(runFile) ? runFile : `./examples/${runFile}`,
     scheme,
     host,
     port: inferredPort,
@@ -2584,10 +3782,115 @@ function initTheme() {
 
 initTheme();
 
+function renderAuthBar() {
+  const toggle = document.getElementById('auth-toggle');
+  if (!toggle) {
+    return;
+  }
+  if (!authState.oidc_enabled) {
+    toggle.classList.add('hidden');
+    return;
+  }
+  toggle.classList.remove('hidden');
+  if (authState.authenticated) {
+    const label = authState.user?.name || authState.user?.email || 'Signed in';
+    toggle.textContent = 'Sign out';
+    toggle.title = `Signed in as ${label}`;
+  } else {
+    toggle.textContent = 'Sign in';
+    toggle.title = 'Sign in';
+  }
+  const newItem = document.getElementById('new-item');
+  if (newItem) {
+    newItem.disabled = Boolean(authState.oidc_enabled && !authState.authenticated);
+    newItem.title = newItem.disabled ? requireSignInMessage() : 'Create in your workspace';
+  }
+}
+
+function toggleAuth() {
+  if (!authState.oidc_enabled) {
+    return;
+  }
+  window.location.href = authState.authenticated ? '/logout' : '/login';
+}
+
+async function boot() {
+  try {
+    authState = await api('/api/me');
+  } catch {
+    authState = {authenticated: false, oidc_enabled: false, user: null};
+  }
+  renderAuthBar();
+  await loadScenarios();
+  updateRunAvailability();
+}
+
 document.getElementById('refresh-scenarios').addEventListener('click', loadScenarios);
-document.getElementById('new-scenario').addEventListener('click', startNewScenario);
-document.getElementById('new-folder').addEventListener('click', createFolder);
+document.getElementById('new-item')?.addEventListener('click', (event) => {
+  event.stopPropagation();
+  toggleNewMenu();
+});
+document.getElementById('new-item-menu')?.addEventListener('click', (event) => {
+  const kind = event.target?.dataset?.kind;
+  if (!kind) {
+    return;
+  }
+  closeNewMenu();
+  void createExplorerItem(kind);
+});
+document.getElementById('ask-dialog-cancel')?.addEventListener('click', () => closeAskDialog(null));
+document.getElementById('ask-dialog-cancel-top')?.addEventListener('click', () => closeAskDialog(null));
+document.getElementById('ask-dialog')?.querySelector('.json-dialog-backdrop')?.addEventListener('click', () => closeAskDialog(null));
+document.getElementById('ask-dialog-confirm')?.addEventListener('click', () => {
+  const list = document.getElementById('ask-dialog-list');
+  const input = document.getElementById('ask-dialog-input');
+  if (list && !list.classList.contains('hidden')) {
+    closeAskDialog(askDialogValue || null);
+    return;
+  }
+  closeAskDialog((input?.value || '').trim() || null);
+});
+document.getElementById('ask-dialog-input')?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    document.getElementById('ask-dialog-confirm')?.click();
+  }
+  if (event.key === 'Escape') {
+    closeAskDialog(null);
+  }
+});
+document.addEventListener('click', (event) => {
+  const hit = event.target instanceof Element ? event.target : event.target?.parentElement;
+  if (!hit?.closest('.new-menu-wrap')) {
+    closeNewMenu();
+  }
+  if (!hit?.closest('.explorer-menu') && !hit?.closest('.tree-more')) {
+    closeExplorerMenu();
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    closeNewMenu();
+    closeExplorerMenu();
+  }
+});
 document.getElementById('save-scenario').addEventListener('click', saveScenario);
+document.getElementById('auth-toggle')?.addEventListener('click', toggleAuth);
+if (copySuiteButton) {
+  copySuiteButton.addEventListener('click', () => {
+    void copyOpenSuite();
+  });
+}
+if (deleteSuiteButton) {
+  deleteSuiteButton.addEventListener('click', () => {
+    void deleteOpenSuite();
+  });
+}
+if (deleteScenarioButton) {
+  deleteScenarioButton.addEventListener('click', () => {
+    void deleteOpenScenario();
+  });
+}
 if (saveSuiteButton) {
   saveSuiteButton.addEventListener('click', () => {
     void saveSuite();
@@ -2619,6 +3922,22 @@ if (testSequenceButton) {
 if (copyStepCurlButton) {
   copyStepCurlButton.addEventListener('click', copyStepCurl);
 }
+importStepCurlButton?.addEventListener('click', openCurlDialog);
+document.getElementById('curl-dialog-cancel')?.addEventListener('click', closeCurlDialog);
+document.getElementById('curl-dialog-cancel-top')?.addEventListener('click', closeCurlDialog);
+document.getElementById('curl-dialog-apply')?.addEventListener('click', () => {
+  void applyCurlDialog();
+});
+curlDialog?.addEventListener('click', (event) => {
+  if (event.target === curlDialog || event.target.dataset.close === 'true') {
+    closeCurlDialog();
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && curlDialog && !curlDialog.classList.contains('hidden')) {
+    closeCurlDialog();
+  }
+});
 document.getElementById('clear-session-env')?.addEventListener('click', () => {
   clearSessionEnvOverrides();
   lastRequiredEnvNames = '';
@@ -2643,7 +3962,10 @@ scenarioEnvironmentSelect.addEventListener('change', () => {
   lastHydratedCurlKey = '';
   lastStepContextVars = {};
   lastRequiredEnvNames = '';
-  renderScenarioBuilder();
+  loadedWorkspaceEnvKey = '';
+  void loadWorkspaceEnvValues().finally(() => {
+    renderScenarioBuilder();
+  });
 });
 
 
@@ -2674,7 +3996,8 @@ bindStepField(stepMethodInput, (step, element) => {
   step.method = element.value;
 });
 bindStepField(stepPathInput, (step, element) => {
-  step.path = element.value;
+  step.path = element.value.trim();
+  delete step.url;
 });
 bindStepField(stepTimeoutInput, (step, element) => {
   if (!element.value) {
@@ -2698,6 +4021,18 @@ bindStepField(stepSaveResponseAsInput, (step, element) => {
   }
   step.save_response_as = element.value.trim();
 });
+stepFollowRedirectsInput?.addEventListener('change', () => {
+  const step = getSelectedStep();
+  if (!step) {
+    return;
+  }
+  if (stepFollowRedirectsInput.checked) {
+    step.follow_redirects = true;
+  } else {
+    delete step.follow_redirects;
+  }
+  renderScenarioBuilder();
+});
 stepStopOnFailureInput.addEventListener('change', () => {
   const step = getSelectedStep();
   if (!step) {
@@ -2711,5 +4046,4 @@ stepStopOnFailureInput.addEventListener('change', () => {
   renderScenarioBuilder();
 });
 
-loadScenarios();
-updateRunAvailability();
+void boot();

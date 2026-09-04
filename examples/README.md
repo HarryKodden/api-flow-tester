@@ -19,7 +19,7 @@ The published example is `demo/`: a two-scenario suite against [JSONPlaceholder]
 
 ## How to run
 
-Open the web UI, select **demo**, enter `user_id` = `1`, then Run Tests.
+Open the web UI, select **demo**, enter `user_id` = `1`, then Run Tests. The published library is read-only; use **Copy to workspace** (or Save) to keep your own copy and private environment values.
 
 Or from the CLI (after setting `user_id` in the suite env or via `--extra-env-file`):
 
