@@ -5,13 +5,15 @@ HTTP/API regression facility: suites, scenarios, and one-pass runs with a web UI
 The CLI entrypoint is still `bin/test.sh`. The product is a regression tester, not a load tester.
 
 ## Features
-- Suite → scenario → step tests with payload templating and named environments
+- Collection → scenario → step tests with payload templating and named environments
 - Public read-only library (`examples/demo`) plus a private workspace per signed-in user
+- Share a collection into another registered user's workspace
 - OIDC sign-in (authorization code + PKCE) and PostgreSQL persistence
-- Web UI for browsing, editing, and running suites/scenarios
+- Web UI for browsing, editing, and running collections/scenarios
 - One-pass regression: one user, one iteration, fail on errors
 - Random data generators and named environments
-- Import scenarios from Postman collections or Insomnia exports
+- Import scenarios from Postman, Insomnia, Bruno, or OpenAPI/Swagger
+- Export collections as Bruno collection JSON
 - Block-based scenario editor with per-step forms, drag-and-drop reordering, and step/sequence dry-runs
 - Live run UX with spinner and a pass/fail list
 
@@ -169,31 +171,58 @@ The web UI supports importing scenarios from existing API collections so you don
 
 ### Supported formats
 
-| Format | How to export |
+| Format | How to export / provide |
 |---|---|
 | **Postman** | Export collection as *Collection v2.1* JSON |
 | **Insomnia JSON** | Export as *Insomnia v4* JSON |
 | **Insomnia YAML** | Export as *Insomnia v5* YAML (the default in recent Insomnia versions) |
+| **Bruno** | Bruno collection JSON (including files from **Export Collection**) |
+| **OpenAPI / Swagger** | OpenAPI 3.x or Swagger 2.0 JSON/YAML |
 
 ### How to import
 
-1. Open the web UI and click **Import** (top-right of the scenario list panel).
-2. Choose a `.json`, `.yaml`, or `.yml` file.
-3. The file is converted server-side and loaded as an editable scenario.
-4. Review the imported steps, adjust the base URL and any headers, then **Save**.
+1. Open a **workspace** suite (copy from the library first if needed).
+2. Use **Import** in the suite header, or **Import** on the suite `⋯` menu.
+3. Choose a `.json`, `.yaml`, or `.yml` file.
+4. The file is converted server-side and added as a new scenario in that suite.
+5. Review the imported steps, adjust environments as needed, then **Save Scenario**.
+
+### How to export
+
+1. Open a suite (workspace or library).
+2. Use **Export** in the suite header, or the same item on the suite `⋯` menu.
+3. Import the downloaded `.bruno.json` into Bruno via **Import**.
+
+Import and export are suite-level only; they are not available while editing a single scenario.
 
 ### What gets converted
 
 - HTTP method, path, request headers, and JSON body
-- Bearer token / basic auth → `Authorization` header
+- Bearer token / basic auth (Bruno) or common auth schemes where present
 - URL query parameters → appended to the step path
-- Insomnia environment variables (see [Environments](#environments) below)
+- Environment / server variables (Insomnia, Bruno, OpenAPI `servers`)
 
-Steps that cannot be mapped (e.g. GraphQL, WebSocket) are skipped with a warning in the server log.
+OpenAPI imports create one step per operation (scaffolding, not a multi-step flow). GraphQL / WebSocket items are skipped.
 
 ### CLI import
 
 There is no CLI import command. Import is only available through the web UI.
+
+## Exporting for Bruno
+
+Suites export as a single Bruno collection JSON file.
+
+1. Open the suite and click **Export** (header or `⋯` menu).
+2. In Bruno: **Import** → select the downloaded `.bruno.json` file.
+
+What is included:
+
+- Each scenario becomes a Bruno folder; each step becomes an HTTP request
+- Method, URL/path, headers, JSON or form bodies, and basic/bearer auth
+- Suite environments (workspace private env values are merged in)
+- Placeholders like `{{ env.server }}` / `{{ vars.id }}` become Bruno `{{server}}` / `{{id}}`
+
+Chained `save` / `vars` values are not auto-wired as Bruno scripts; set those variables in Bruno if a later request needs them.
 
 ---
 

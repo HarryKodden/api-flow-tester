@@ -4,32 +4,39 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
+from tools.bruno_export import bruno_export_filename, collection_to_bruno
 from webapp.auth import current_user_required
 from webapp.db import get_db
-from webapp.models import Scenario, Suite, User, WorkspaceFolder
+from webapp.models import Collection, Scenario, User, WorkspaceFolder
 from webapp.workspace import (
+    COLLECTION_FILENAME,
     EXAMPLES_DIR,
     LIBRARY_READONLY,
-    SUITE_FILENAME,
     attach_scenario,
-    empty_suite_document,
-    is_suite_document,
+    clone_library_path,
+    clone_workspace_collection_to_user,
+    collection_document_for_client,
+    empty_collection_document,
+    is_collection_document,
+    is_collection_filename,
     is_workspace_path,
-    next_owned_suite_position,
-    owned_suite,
+    load_collection_env_values,
+    next_owned_collection_position,
+    owned_collection,
     parse_workspace_path,
     resolve_examples_path,
     safe_filename,
-    suite_document_for_client,
     unique_scenario_name,
     utcnow,
+    workspace_collection_path,
     workspace_scenario_path,
-    workspace_suite_path,
 )
 
 ORDER_FILE = ".order.json"
@@ -150,17 +157,17 @@ def next_folder_position(db: Session, user: User, parent: str = "") -> int:
     return int(current or 0) + 1
 
 
-def suite_node(suite: Suite) -> dict[str, Any]:
-    document = suite_document_for_client(suite)
+def collection_node(collection: Collection) -> dict[str, Any]:
+    document = collection_document_for_client(collection)
     members = document.get("scenarios") if isinstance(document.get("scenarios"), list) else []
     return {
         "type": "file",
-        "kind": "suite",
-        "name": suite.name or SUITE_FILENAME,
-        "path": workspace_suite_path(suite.id),
+        "kind": "collection",
+        "name": collection.name or COLLECTION_FILENAME,
+        "path": workspace_collection_path(collection.id),
         "source": "workspace",
-        "folder": suite.folder or "",
-        "base_url": (suite.document or {}).get("base_url"),
+        "folder": collection.folder or "",
+        "base_url": (collection.document or {}).get("base_url"),
         "step_count": 0,
         "member_count": len(members),
         "members": members,
@@ -171,18 +178,18 @@ def workspace_tree(user: User, db: Session) -> dict[str, Any]:
     folders = db.scalars(
         select(WorkspaceFolder).where(WorkspaceFolder.owner_id == user.id).order_by(WorkspaceFolder.position, WorkspaceFolder.name)
     ).all()
-    suites = db.scalars(
-        select(Suite)
-        .options(selectinload(Suite.scenarios))
-        .where(Suite.owner_id == user.id)
-        .order_by(Suite.position, Suite.name)
+    collections = db.scalars(
+        select(Collection)
+        .options(selectinload(Collection.scenarios))
+        .where(Collection.owner_id == user.id)
+        .order_by(Collection.position, Collection.name)
     ).all()
     by_parent: dict[str, list[WorkspaceFolder]] = {}
     for folder in folders:
         by_parent.setdefault(folder.parent or "", []).append(folder)
-    by_folder: dict[str, list[Suite]] = {}
-    for suite in suites:
-        by_folder.setdefault(suite.folder or "", []).append(suite)
+    by_folder: dict[str, list[Collection]] = {}
+    for collection in collections:
+        by_folder.setdefault(collection.folder or "", []).append(collection)
 
     def folder_children(parent: str) -> list[dict[str, Any]]:
         children: list[dict[str, Any]] = []
@@ -197,7 +204,7 @@ def workspace_tree(user: User, db: Session) -> dict[str, Any]:
                 "order_key": folder.name,
                 "children": folder_children(path),
             })
-        children.extend(suite_node(item) for item in by_folder.get(parent, []))
+        children.extend(collection_node(item) for item in by_folder.get(parent, []))
         return children
 
     return {
@@ -230,35 +237,35 @@ def create_workspace_folder(db: Session, user: User, name: str, parent: str = ""
     return {"status": "created", "kind": "folder", "path": workspace_folder_path(path), "name": slug, "parent": parent_path}
 
 
-def create_workspace_suite(db: Session, user: User, name: str, folder: str) -> dict[str, Any]:
+def create_workspace_collection(db: Session, user: User, name: str, folder: str) -> dict[str, Any]:
     folder_name = normalize_folder_path(folder)
     if folder_name and get_workspace_folder(db, user, folder_name) is None:
         raise HTTPException(status_code=404, detail="Folder not found")
-    document = empty_suite_document(name)
-    suite = Suite(
+    document = empty_collection_document(name)
+    collection = Collection(
         owner_id=user.id,
         name=name.strip() or "Untitled",
         description="",
         selected_environment="",
         folder=folder_name,
-        position=next_owned_suite_position(db, user, folder_name),
+        position=next_owned_collection_position(db, user, folder_name),
         document=document,
     )
-    db.add(suite)
+    db.add(collection)
     db.flush()
-    return {"status": "created", "kind": "suite", "id": suite.id, "path": workspace_suite_path(suite.id), "name": suite.name}
+    return {"status": "created", "kind": "collection", "id": collection.id, "path": workspace_collection_path(collection.id), "name": collection.name}
 
 
-def create_workspace_scenario(db: Session, user: User, suite_path: str, name: str) -> dict[str, Any]:
-    suite_id, _filename = parse_workspace_path(suite_path)
-    suite = owned_suite(db, user, suite_id)
-    filename = unique_scenario_name(suite, name)
-    scenario = attach_scenario(db, user, suite, filename, {"name": Path(filename).stem, "steps": []})
+def create_workspace_scenario(db: Session, user: User, collection_path: str, name: str) -> dict[str, Any]:
+    collection_id, _filename = parse_workspace_path(collection_path)
+    collection = owned_collection(db, user, collection_id)
+    filename = unique_scenario_name(collection, name)
+    scenario = attach_scenario(db, user, collection, filename, {"name": Path(filename).stem, "steps": []})
     return {
         "status": "created",
         "kind": "scenario",
-        "path": workspace_scenario_path(suite.id, scenario.name),
-        "suite_path": workspace_suite_path(suite.id),
+        "path": workspace_scenario_path(collection.id, scenario.name),
+        "collection_path": workspace_collection_path(collection.id),
         "name": scenario.name,
     }
 
@@ -277,44 +284,44 @@ def create_library_folder(parent: str, name: str) -> dict[str, Any]:
     return {"status": "created", "kind": "folder", "path": relative, "name": slug}
 
 
-def create_library_suite(folder: str, name: str) -> dict[str, Any]:
+def create_library_collection(folder: str, name: str) -> dict[str, Any]:
     base = resolve_examples_path(folder) if folder else EXAMPLES_DIR
     if not base.is_dir():
         raise HTTPException(status_code=400, detail="Folder not found")
-    filename = SUITE_FILENAME
+    filename = COLLECTION_FILENAME
     if (base / filename).exists():
         filename = safe_filename(name)
     if (base / filename).exists():
-        raise HTTPException(status_code=409, detail="Suite file already exists")
-    document = empty_suite_document(name.strip() or Path(filename).stem)
+        raise HTTPException(status_code=409, detail="Collection file already exists")
+    document = empty_collection_document(name.strip() or Path(filename).stem)
     (base / filename).write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
     append_order(base, filename)
     relative = f"{folder}/{filename}" if folder else filename
-    return {"status": "created", "kind": "suite", "path": relative, "name": document["name"]}
+    return {"status": "created", "kind": "collection", "path": relative, "name": document["name"]}
 
 
-def create_library_scenario(suite_path: str, name: str) -> dict[str, Any]:
-    suite_file = resolve_examples_path(suite_path)
-    if not suite_file.is_file():
-        raise HTTPException(status_code=404, detail="Suite not found")
-    suite = json.loads(suite_file.read_text(encoding="utf-8"))
-    if not isinstance(suite, dict):
-        raise HTTPException(status_code=400, detail="Invalid suite")
+def create_library_scenario(collection_path: str, name: str) -> dict[str, Any]:
+    collection_file = resolve_examples_path(collection_path)
+    if not collection_file.is_file():
+        raise HTTPException(status_code=404, detail="Collection not found")
+    collection = json.loads(collection_file.read_text(encoding="utf-8"))
+    if not isinstance(collection, dict):
+        raise HTTPException(status_code=400, detail="Invalid collection")
     filename = safe_filename(name)
-    dest = suite_file.parent / filename
+    dest = collection_file.parent / filename
     if dest.exists():
-        filename = unique_scenario_name_in_dir(suite_file.parent, filename)
-        dest = suite_file.parent / filename
+        filename = unique_scenario_name_in_dir(collection_file.parent, filename)
+        dest = collection_file.parent / filename
     dest.write_text(json.dumps({"name": Path(filename).stem, "steps": []}, indent=2) + "\n", encoding="utf-8")
-    members = suite.get("scenarios") if isinstance(suite.get("scenarios"), list) else []
+    members = collection.get("scenarios") if isinstance(collection.get("scenarios"), list) else []
     members = [item for item in members if isinstance(item, str)]
     if filename not in members:
         members.append(filename)
-    suite["scenarios"] = members
-    suite["steps"] = []
-    suite_file.write_text(json.dumps(suite, indent=2) + "\n", encoding="utf-8")
+    collection["scenarios"] = members
+    collection["steps"] = []
+    collection_file.write_text(json.dumps(collection, indent=2) + "\n", encoding="utf-8")
     relative = str(dest.relative_to(EXAMPLES_DIR)).replace("\\", "/")
-    return {"status": "created", "kind": "scenario", "path": relative, "suite_path": suite_path, "name": filename}
+    return {"status": "created", "kind": "scenario", "path": relative, "collection_path": collection_path, "name": filename}
 
 
 def unique_scenario_name_in_dir(directory: Path, desired: str) -> str:
@@ -331,11 +338,11 @@ def unique_scenario_name_in_dir(directory: Path, desired: str) -> str:
 
 def load_item_document(db: Session, user: User, path: str) -> tuple[dict[str, Any], str]:
     if is_workspace_path(path):
-        suite_id, filename = parse_workspace_path(path)
-        suite = owned_suite(db, user, suite_id)
-        if filename == SUITE_FILENAME:
-            return suite_document_for_client(suite), "suite"
-        scenario = next((item for item in suite.scenarios if item.name == filename), None)
+        collection_id, filename = parse_workspace_path(path)
+        collection = owned_collection(db, user, collection_id)
+        if is_collection_filename(filename):
+            return collection_document_for_client(collection), "collection"
+        scenario = next((item for item in collection.scenarios if item.name == filename), None)
         if scenario is None:
             raise HTTPException(status_code=404, detail="Scenario not found")
         return dict(scenario.document or {}), "scenario"
@@ -345,49 +352,49 @@ def load_item_document(db: Session, user: User, path: str) -> tuple[dict[str, An
     payload = json.loads(file_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Invalid JSON")
-    return payload, "suite" if is_suite_document(payload) or file_path.name == SUITE_FILENAME else "scenario"
+    return payload, "collection" if is_collection_document(payload) or is_collection_filename(file_path.name) else "scenario"
 
 
-def copy_scenario(db: Session, user: User, source: str, dest_suite: str) -> dict[str, Any]:
+def copy_scenario(db: Session, user: User, source: str, dest_collection: str) -> dict[str, Any]:
     document, kind = load_item_document(db, user, source)
     if kind != "scenario":
         raise HTTPException(status_code=400, detail="Source must be a scenario")
     name = Path(source).name
-    if is_workspace_path(dest_suite):
-        suite_id, _filename = parse_workspace_path(dest_suite)
-        suite = owned_suite(db, user, suite_id)
-        saved = attach_scenario(db, user, suite, name, document)
+    if is_workspace_path(dest_collection):
+        collection_id, _filename = parse_workspace_path(dest_collection)
+        collection = owned_collection(db, user, collection_id)
+        saved = attach_scenario(db, user, collection, name, document)
         return {
             "status": "copied",
-            "path": workspace_scenario_path(suite.id, saved.name),
-            "suite_path": workspace_suite_path(suite.id),
+            "path": workspace_scenario_path(collection.id, saved.name),
+            "collection_path": workspace_collection_path(collection.id),
         }
-    suite_file = resolve_examples_path(dest_suite)
-    if not suite_file.is_file():
-        raise HTTPException(status_code=404, detail="Destination suite not found")
-    filename = unique_scenario_name_in_dir(suite_file.parent, name)
-    dest = suite_file.parent / filename
+    collection_file = resolve_examples_path(dest_collection)
+    if not collection_file.is_file():
+        raise HTTPException(status_code=404, detail="Destination collection not found")
+    filename = unique_scenario_name_in_dir(collection_file.parent, name)
+    dest = collection_file.parent / filename
     dest.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-    suite = json.loads(suite_file.read_text(encoding="utf-8"))
-    members = suite.get("scenarios") if isinstance(suite.get("scenarios"), list) else []
+    collection = json.loads(collection_file.read_text(encoding="utf-8"))
+    members = collection.get("scenarios") if isinstance(collection.get("scenarios"), list) else []
     members = [item for item in members if isinstance(item, str)]
     members.append(filename)
-    suite["scenarios"] = members
-    suite_file.write_text(json.dumps(suite, indent=2) + "\n", encoding="utf-8")
+    collection["scenarios"] = members
+    collection_file.write_text(json.dumps(collection, indent=2) + "\n", encoding="utf-8")
     return {
         "status": "copied",
         "path": str(dest.relative_to(EXAMPLES_DIR)).replace("\\", "/"),
-        "suite_path": dest_suite,
+        "collection_path": dest_collection,
     }
 
 
-def reorder_workspace_suites(db: Session, user: User, folder: str, items: list[str]) -> None:
-    suites = db.scalars(select(Suite).where(Suite.owner_id == user.id, Suite.folder == folder)).all()
-    by_path = {workspace_suite_path(item.id): item for item in suites}
+def reorder_workspace_collections(db: Session, user: User, folder: str, items: list[str]) -> None:
+    collections = db.scalars(select(Collection).where(Collection.owner_id == user.id, Collection.folder == folder)).all()
+    by_path = {workspace_collection_path(item.id): item for item in collections}
     for index, path in enumerate(items):
-        suite = by_path.get(path)
-        if suite is not None:
-            suite.position = index
+        collection = by_path.get(path)
+        if collection is not None:
+            collection.position = index
 
 
 def reorder_workspace_folders(db: Session, user: User, parent: str, items: list[str]) -> None:
@@ -402,19 +409,19 @@ def reorder_workspace_folders(db: Session, user: User, parent: str, items: list[
             folder.position = index
 
 
-def reorder_suite_scenarios(db: Session, user: User, suite_path: str, items: list[str]) -> None:
+def reorder_collection_scenarios(db: Session, user: User, collection_path: str, items: list[str]) -> None:
     names = [Path(item).name for item in items]
-    if is_workspace_path(suite_path):
-        suite_id, _filename = parse_workspace_path(suite_path)
-        suite = owned_suite(db, user, suite_id)
-        payload = suite_document_for_client(suite)
+    if is_workspace_path(collection_path):
+        collection_id, _filename = parse_workspace_path(collection_path)
+        collection = owned_collection(db, user, collection_id)
+        payload = collection_document_for_client(collection)
         payload["scenarios"] = names
-        suite.document = payload
+        collection.document = payload
         return
-    suite_file = resolve_examples_path(suite_path)
-    suite = json.loads(suite_file.read_text(encoding="utf-8"))
-    suite["scenarios"] = names
-    suite_file.write_text(json.dumps(suite, indent=2) + "\n", encoding="utf-8")
+    collection_file = resolve_examples_path(collection_path)
+    collection = json.loads(collection_file.read_text(encoding="utf-8"))
+    collection["scenarios"] = names
+    collection_file.write_text(json.dumps(collection, indent=2) + "\n", encoding="utf-8")
 
 
 def delete_workspace_folder(db: Session, user: User, path: str) -> dict[str, Any]:
@@ -422,7 +429,7 @@ def delete_workspace_folder(db: Session, user: User, path: str) -> dict[str, Any
     folder = get_workspace_folder(db, user, rel)
     if folder is None:
         raise HTTPException(status_code=404, detail="Folder not found")
-    occupied = db.scalar(select(func.count()).select_from(Suite).where(Suite.owner_id == user.id, Suite.folder == rel))
+    occupied = db.scalar(select(func.count()).select_from(Collection).where(Collection.owner_id == user.id, Collection.folder == rel))
     nested = db.scalar(
         select(func.count()).select_from(WorkspaceFolder).where(
             WorkspaceFolder.owner_id == user.id,
@@ -455,8 +462,8 @@ def move_workspace_folder(db: Session, user: User, path: str, dest: str) -> dict
         if item.id == folder.id:
             continue
         item.parent = rewrite_folder_prefix(item.parent, old_path, new_path)
-    for suite in db.scalars(select(Suite).where(Suite.owner_id == user.id)).all():
-        suite.folder = rewrite_folder_prefix(suite.folder, old_path, new_path)
+    for collection in db.scalars(select(Collection).where(Collection.owner_id == user.id)).all():
+        collection.folder = rewrite_folder_prefix(collection.folder, old_path, new_path)
     return {"status": "moved", "kind": "folder", "path": workspace_folder_path(new_path), "parent": dest_path}
 
 
@@ -490,22 +497,22 @@ def create_item(
     kind = str(payload.get("kind") or "").strip()
     name = str(payload.get("name") or "").strip()
     target = str(payload.get("target") or "").strip()
-    if kind not in {"folder", "suite", "scenario"}:
-        raise HTTPException(status_code=400, detail="kind must be folder, suite, or scenario")
+    if kind not in {"folder", "collection", "scenario"}:
+        raise HTTPException(status_code=400, detail="kind must be folder, collection, or scenario")
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
     if kind == "folder":
         parent = workspace_folder_name(target) if is_workspace_folder_path(target) and target != WORKSPACE_ROOT else ""
         return create_workspace_folder(db, user, name, parent)
-    if kind == "suite":
+    if kind == "collection":
         folder = workspace_folder_name(target) if is_workspace_folder_path(target) else ""
-        return create_workspace_suite(db, user, name, folder)
-    suite_path = target
-    if not suite_path:
-        raise HTTPException(status_code=400, detail="Open a workspace suite first")
-    if not is_workspace_path(suite_path):
+        return create_workspace_collection(db, user, name, folder)
+    collection_path = target
+    if not collection_path:
+        raise HTTPException(status_code=400, detail="Open a workspace collection first")
+    if not is_workspace_path(collection_path):
         raise HTTPException(status_code=403, detail=LIBRARY_READONLY)
-    return create_workspace_scenario(db, user, suite_path, name)
+    return create_workspace_scenario(db, user, collection_path, name)
 
 
 @router.post("/reorder")
@@ -522,13 +529,13 @@ def reorder_items(
     if kind == "scenarios":
         if not is_workspace_path(parent):
             raise HTTPException(status_code=403, detail=LIBRARY_READONLY)
-        reorder_suite_scenarios(db, user, parent, items)
+        reorder_collection_scenarios(db, user, parent, items)
         return {"status": "ok"}
     if kind == "folders":
         reorder_workspace_folders(db, user, parent, items)
         return {"status": "ok"}
     if is_workspace_folder_path(parent) or parent == WORKSPACE_ROOT:
-        reorder_workspace_suites(db, user, workspace_folder_name(parent), items)
+        reorder_workspace_collections(db, user, workspace_folder_name(parent), items)
         return {"status": "ok"}
     raise HTTPException(status_code=403, detail=LIBRARY_READONLY)
 
@@ -548,8 +555,8 @@ def copy_scenario_route(
     return copy_scenario(db, user, source, dest)
 
 
-@router.post("/move-suite")
-def move_suite_route(
+@router.post("/move-collection")
+def move_collection_route(
     payload: dict[str, Any],
     user: User = Depends(current_user_required),
     db: Session = Depends(get_db),
@@ -560,14 +567,14 @@ def move_suite_route(
         raise HTTPException(status_code=403, detail=LIBRARY_READONLY)
     if dest not in {"", WORKSPACE_ROOT} and not is_workspace_folder_path(dest):
         raise HTTPException(status_code=400, detail="Destination must be a workspace folder")
-    suite_id, _filename = parse_workspace_path(path)
-    suite = owned_suite(db, user, suite_id)
+    collection_id, _filename = parse_workspace_path(path)
+    collection = owned_collection(db, user, collection_id)
     folder = workspace_folder_name(dest) if is_workspace_folder_path(dest) else ""
     if folder and get_workspace_folder(db, user, folder) is None:
         raise HTTPException(status_code=404, detail="Folder not found")
-    suite.folder = folder
-    suite.position = next_owned_suite_position(db, user, folder)
-    return {"status": "moved", "path": workspace_suite_path(suite.id), "folder": folder}
+    collection.folder = folder
+    collection.position = next_owned_collection_position(db, user, folder)
+    return {"status": "moved", "path": workspace_collection_path(collection.id), "folder": folder}
 
 
 @router.post("/move-folder")
@@ -602,8 +609,8 @@ def rename_workspace_folder(db: Session, user: User, path: str, name: str) -> di
         if item.id == folder.id:
             continue
         item.parent = rewrite_folder_prefix(item.parent, old_rel, new_rel)
-    for suite in db.scalars(select(Suite).where(Suite.owner_id == user.id)).all():
-        suite.folder = rewrite_folder_prefix(suite.folder, old_rel, new_rel)
+    for collection in db.scalars(select(Collection).where(Collection.owner_id == user.id)).all():
+        collection.folder = rewrite_folder_prefix(collection.folder, old_rel, new_rel)
     return {
         "status": "renamed",
         "kind": "folder",
@@ -613,30 +620,30 @@ def rename_workspace_folder(db: Session, user: User, path: str, name: str) -> di
     }
 
 
-def rename_workspace_suite(db: Session, user: User, path: str, name: str) -> dict[str, Any]:
-    suite_id, filename = parse_workspace_path(path)
-    if filename != SUITE_FILENAME:
-        raise HTTPException(status_code=400, detail="Not a suite path")
-    suite = owned_suite(db, user, suite_id)
+def rename_workspace_collection(db: Session, user: User, path: str, name: str) -> dict[str, Any]:
+    collection_id, filename = parse_workspace_path(path)
+    if not is_collection_filename(filename):
+        raise HTTPException(status_code=400, detail="Not a collection path")
+    collection = owned_collection(db, user, collection_id)
     new_name = name.strip() or "Untitled"
-    suite.name = new_name
-    payload = suite_document_for_client(suite)
+    collection.name = new_name
+    payload = collection_document_for_client(collection)
     payload["name"] = new_name
-    suite.document = payload
-    suite.updated_at = utcnow()
-    return {"status": "renamed", "kind": "suite", "path": path, "name": new_name}
+    collection.document = payload
+    collection.updated_at = utcnow()
+    return {"status": "renamed", "kind": "collection", "path": path, "name": new_name}
 
 
 def rename_workspace_scenario(db: Session, user: User, path: str, name: str) -> dict[str, Any]:
-    suite_id, filename = parse_workspace_path(path)
-    if filename == SUITE_FILENAME:
+    collection_id, filename = parse_workspace_path(path)
+    if is_collection_filename(filename):
         raise HTTPException(status_code=400, detail="Not a scenario path")
-    suite = owned_suite(db, user, suite_id)
-    scenario = next((item for item in suite.scenarios if item.name == filename), None)
+    collection = owned_collection(db, user, collection_id)
+    scenario = next((item for item in collection.scenarios if item.name == filename), None)
     if scenario is None:
         raise HTTPException(status_code=404, detail="Scenario not found")
     candidate = safe_filename(name)
-    taken = {item.name.lower() for item in suite.scenarios if item.id != scenario.id}
+    taken = {item.name.lower() for item in collection.scenarios if item.id != scenario.id}
     if candidate.lower() in taken:
         raise HTTPException(status_code=409, detail="A scenario with that name already exists")
     old_name = scenario.name
@@ -645,20 +652,20 @@ def rename_workspace_scenario(db: Session, user: User, path: str, name: str) -> 
     scenario.document = document
     scenario.name = candidate
     scenario.updated_at = utcnow()
-    payload = suite_document_for_client(suite)
+    payload = collection_document_for_client(collection)
     members = payload.get("scenarios") if isinstance(payload.get("scenarios"), list) else []
     replaced = [candidate if item == old_name else item for item in members if isinstance(item, str)]
     if candidate not in replaced:
         replaced.append(candidate)
     payload["scenarios"] = replaced
-    suite.document = payload
-    suite.updated_at = utcnow()
+    collection.document = payload
+    collection.updated_at = utcnow()
     return {
         "status": "renamed",
         "kind": "scenario",
-        "path": workspace_scenario_path(suite.id, candidate),
+        "path": workspace_scenario_path(collection.id, candidate),
         "from": path,
-        "suite_path": workspace_suite_path(suite.id),
+        "collection_path": workspace_collection_path(collection.id),
         "name": candidate,
     }
 
@@ -678,9 +685,9 @@ def rename_item(
     if is_workspace_folder_path(path) and path != WORKSPACE_ROOT:
         return rename_workspace_folder(db, user, path, name)
     if is_workspace_path(path):
-        _suite_id, filename = parse_workspace_path(path)
-        if filename == SUITE_FILENAME:
-            return rename_workspace_suite(db, user, path, name)
+        _collection_id, filename = parse_workspace_path(path)
+        if is_collection_filename(filename):
+            return rename_workspace_collection(db, user, path, name)
         return rename_workspace_scenario(db, user, path, name)
     raise HTTPException(status_code=403, detail=LIBRARY_READONLY)
 
@@ -696,3 +703,112 @@ def delete_folder(
     if is_workspace_folder_path(path):
         raise HTTPException(status_code=400, detail="Cannot delete the workspace root")
     raise HTTPException(status_code=403, detail=LIBRARY_READONLY)
+
+
+def _merge_collection_environments(base: dict[str, Any], overrides_by_env: dict[str, dict[str, str]]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    names = set(base) | set(overrides_by_env)
+    for name in names:
+        values = dict(base.get(name) or {}) if isinstance(base.get(name), dict) else {}
+        values.update(overrides_by_env.get(name) or {})
+        merged[name] = values
+    return merged
+
+
+def load_collection_export_payload(db: Session, user: User, path: str) -> tuple[dict[str, Any], list[tuple[str, dict[str, Any]]], dict[str, Any]]:
+    if is_workspace_path(path):
+        collection_id, filename = parse_workspace_path(path)
+        if not is_collection_filename(filename):
+            raise HTTPException(status_code=400, detail="Export is only available for collections")
+        collection = owned_collection(db, user, collection_id)
+        document = collection_document_for_client(collection)
+        members = [(item.name, dict(item.document or {})) for item in collection.scenarios]
+        env_base = document.get("environments") if isinstance(document.get("environments"), dict) else {}
+        overrides: dict[str, dict[str, str]] = {}
+        for env_name in env_base:
+            private = load_collection_env_values(db, user, collection.id, str(env_name))
+            if private:
+                overrides[str(env_name)] = private
+        environments = _merge_collection_environments(env_base, overrides)
+        return document, members, environments
+
+    file_path = resolve_examples_path(path)
+    if not file_path.is_file() or file_path.suffix.lower() != ".json":
+        raise HTTPException(status_code=404, detail="Collection not found")
+    payload = json.loads(file_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid collection JSON")
+    if not (is_collection_document(payload) or is_collection_filename(file_path.name)):
+        raise HTTPException(status_code=400, detail="Export is only available for collections")
+    members: list[tuple[str, dict[str, Any]]] = []
+    for member in payload.get("scenarios") or []:
+        if not isinstance(member, str) or not member.strip():
+            continue
+        member_path = file_path.parent / Path(member).name
+        if not member_path.is_file():
+            members.append((Path(member).name, {"name": Path(member).stem, "steps": []}))
+            continue
+        try:
+            member_doc = json.loads(member_path.read_text(encoding="utf-8"))
+        except Exception:
+            member_doc = {"name": Path(member).stem, "steps": []}
+        if not isinstance(member_doc, dict):
+            member_doc = {"name": Path(member).stem, "steps": []}
+        members.append((Path(member).name, member_doc))
+    environments = payload.get("environments") if isinstance(payload.get("environments"), dict) else {}
+    return payload, members, environments
+
+
+@router.get("/export-bruno")
+def export_collection_bruno(
+    path: str = Query(..., min_length=1),
+    user: User = Depends(current_user_required),
+    db: Session = Depends(get_db),
+) -> Response:
+    collection, members, environments = load_collection_export_payload(db, user, path)
+    collection = collection_to_bruno(collection, members, environments=environments)
+    filename = bruno_export_filename(str(collection.get("name") or "collection"))
+    body = json.dumps(collection, indent=2, ensure_ascii=False) + "\n"
+    headers = {
+        "Content-Disposition": f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quote(filename)}",
+    }
+    return Response(content=body, media_type="application/json", headers=headers)
+
+
+@router.post("/share-collection")
+def share_collection(
+    payload: dict[str, Any],
+    user: User = Depends(current_user_required),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    path = str(payload.get("path") or "").strip()
+    recipient_id = str(payload.get("user_id") or "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    if not recipient_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if recipient_id == user.id:
+        raise HTTPException(status_code=400, detail="Cannot share a collection with yourself")
+
+    recipient = db.scalar(select(User).where(User.id == recipient_id))
+    if recipient is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if is_workspace_path(path):
+        collection_id, filename = parse_workspace_path(path)
+        if not is_collection_filename(filename):
+            raise HTTPException(status_code=400, detail="Share is only available for collections")
+        source = owned_collection(db, user, collection_id)
+        shared = clone_workspace_collection_to_user(db, source, recipient)
+    else:
+        shared = clone_library_path(db, recipient, path)
+
+    return {
+        "status": "shared",
+        "path": path,
+        "recipient_id": recipient.id,
+        "recipient_name": recipient.name or recipient.email or recipient.id,
+        "collection_id": shared.id,
+        "collection_path": workspace_collection_path(shared.id),
+        "name": shared.name,
+    }

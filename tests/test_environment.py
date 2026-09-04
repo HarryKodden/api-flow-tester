@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from tools.scenario_runner import (
     apply_env_overrides,
-    apply_suite_defaults,
+    apply_collection_defaults,
     expand_environment_values,
     expand_placeholder_defaults,
     finalize_environment_values,
-    is_suite,
+    is_collection,
     missing_environment_dependencies,
     parse_placeholder_token,
     resolve_base_url,
@@ -100,16 +100,16 @@ def test_apply_env_overrides_nested_and_blank():
     assert "blank" not in values
 
 
-def test_apply_suite_defaults_merges_environments_without_forcing_selection():
+def test_apply_collection_defaults_merges_environments_without_forcing_selection():
     child = {"environments": {"dev": {"token": "child"}}, "selected_environment": "", "steps": []}
-    suite = {
-        "environments": {"dev": {"server": "https://suite.example.org", "token": "suite"}},
+    collection = {
+        "environments": {"dev": {"server": "https://collection.example.org", "token": "collection"}},
         "selected_environment": "",
         "base_url": "",
     }
-    merged = apply_suite_defaults(child, suite)
-    assert merged["environments"]["dev"]["server"] == "https://suite.example.org"
-    assert merged["environments"]["dev"]["token"] == "suite"
+    merged = apply_collection_defaults(child, collection)
+    assert merged["environments"]["dev"]["server"] == "https://collection.example.org"
+    assert merged["environments"]["dev"]["token"] == "collection"
     assert merged.get("selected_environment", "") == ""
 
 
@@ -159,8 +159,8 @@ def test_placeholder_default_is_overridden_when_set():
     assert "token" in missing_environment_dependencies({}, mixed)
 
 
-def test_is_suite_and_base_url_from_steps():
-    assert is_suite({"scenarios": ["a.json"], "steps": []})
-    assert not is_suite({"scenarios": [], "steps": [{"path": "/"}]})
+def test_is_collection_and_base_url_from_steps():
+    assert is_collection({"scenarios": ["a.json"], "steps": []})
+    assert not is_collection({"scenarios": [], "steps": [{"path": "/"}]})
     assert _base_url_from_steps([{"path": "/relative"}, {"path": "https://api.example.org/clients"}]) == "https://api.example.org"
     assert _base_url_from_steps([{"path": "/relative"}]) == ""

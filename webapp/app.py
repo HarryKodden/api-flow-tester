@@ -20,16 +20,19 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi import Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.datastructures import MutableHeaders
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from tools.bruno_import import bruno_suggested_name, convert_bruno_collection, is_bruno_collection
 from tools.curl_import import parse_curl_command
+from tools.openapi_import import convert_openapi_document, is_openapi_document, openapi_suggested_name
 from tools.scenario_runner import (
     apply_save,
-    apply_suite_defaults,
-    discover_parent_suite,
+    apply_collection_defaults,
+    discover_parent_collection,
     apply_env_overrides,
     expand_environment_values,
     expand_placeholder_defaults,
@@ -62,21 +65,21 @@ from webapp.auth import (
     session_https_only,
 )
 from webapp.db import get_db, run_migrations
-from webapp.models import Suite, User
+from webapp.models import User
 from webapp.explorer import router as explorer_router
 from webapp.explorer import read_order, sort_named, workspace_tree
 from webapp.workspace import (
     LIBRARY_READONLY,
-    SUITE_FILENAME,
     attach_scenario,
-    empty_suite_document,
+    is_collection_filename,
     is_workspace_path,
-    load_suite_env_values,
+    load_collection_env_values,
     materialize_workspace_run,
-    owned_suite,
+    owned_collection,
     parse_workspace_path,
     router as workspace_router,
     unique_scenario_name,
+    workspace_collection_path,
     workspace_scenario_path,
 )
 
@@ -166,6 +169,24 @@ def me(user: User | None = Depends(current_user_optional)) -> dict[str, Any]:
     return public_user(user)
 
 
+@app.get("/api/users")
+def list_users(
+    user: User = Depends(current_user_required),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    rows = db.scalars(select(User).where(User.id != user.id).order_by(User.name, User.email, User.id)).all()
+    return {
+        "users": [
+            {
+                "id": row.id,
+                "name": row.name or "",
+                "email": row.email or "",
+            }
+            for row in rows
+        ]
+    }
+
+
 @app.get("/login")
 async def login(request: Request):
     if not oidc_enabled():
@@ -250,7 +271,7 @@ def _scenario_file_node(path: Path, relative: str) -> dict[str, Any]:
         data = {}
     members = data.get("scenarios")
     steps = data.get("steps") or []
-    is_suite = path.name == SUITE_FILENAME or (
+    is_collection = is_collection_filename(path.name) or (
         isinstance(members, list) and len(members) > 0 and len(steps) == 0
     )
     member_names = [name for name in members if isinstance(name, str) and name.strip()] if isinstance(members, list) else []
@@ -259,10 +280,10 @@ def _scenario_file_node(path: Path, relative: str) -> dict[str, Any]:
         "name": path.name,
         "path": relative.replace("\\", "/"),
         "base_url": data.get("base_url"),
-        "kind": "suite" if is_suite else "scenario",
+        "kind": "collection" if is_collection else "scenario",
         "step_count": len(steps) if isinstance(steps, list) else 0,
-        "member_count": len(member_names) if is_suite else 0,
-        "members": member_names if is_suite else [],
+        "member_count": len(member_names) if is_collection else 0,
+        "members": member_names if is_collection else [],
     }
 
 
@@ -313,8 +334,8 @@ def list_scenarios(
     return _json(tree)
 
 
-@app.get("/api/scenarios/parent-suite")
-def parent_suite(path: str = Query(..., min_length=1)) -> JSONResponse:
+@app.get("/api/scenarios/parent-collection")
+def parent_collection(path: str = Query(..., min_length=1)) -> JSONResponse:
     file_path = _resolve_examples_path(path)
     if not file_path.is_file() or file_path.suffix.lower() != ".json":
         raise HTTPException(status_code=404, detail="Scenario not found")
@@ -324,24 +345,24 @@ def parent_suite(path: str = Query(..., min_length=1)) -> JSONResponse:
         raise HTTPException(status_code=400, detail=f"Invalid scenario JSON: {exc}") from exc
     if not isinstance(scenario, dict):
         return _json({"status": "none"})
-    suite = discover_parent_suite(file_path, scenario)
-    if not suite:
+    collection = discover_parent_collection(file_path, scenario)
+    if not collection:
         return _json({"status": "none"})
-    suite_name = str(suite.get("_file") or "")
+    collection_name = str(collection.get("_file") or "")
     parent_rel = str(file_path.parent.relative_to(EXAMPLES_DIR)).replace("\\", "/")
     if parent_rel in {"", "."}:
-        relative = suite_name
+        relative = collection_name
     else:
-        relative = f"{parent_rel}/{suite_name}" if suite_name else parent_rel
+        relative = f"{parent_rel}/{collection_name}" if collection_name else parent_rel
     return _json({
         "status": "ok",
         "path": relative,
-        "name": suite.get("name"),
-        "description": suite.get("description") or "",
-        "selected_environment": suite.get("selected_environment") or "",
-        "environments": suite.get("environments") if isinstance(suite.get("environments"), dict) else {},
-        "random_generators": suite.get("random_generators") if isinstance(suite.get("random_generators"), dict) else {},
-        "scenarios": suite.get("scenarios") if isinstance(suite.get("scenarios"), list) else [],
+        "name": collection.get("name"),
+        "description": collection.get("description") or "",
+        "selected_environment": collection.get("selected_environment") or "",
+        "environments": collection.get("environments") if isinstance(collection.get("environments"), dict) else {},
+        "random_generators": collection.get("random_generators") if isinstance(collection.get("random_generators"), dict) else {},
+        "scenarios": collection.get("scenarios") if isinstance(collection.get("scenarios"), list) else [],
     })
 
 
@@ -866,17 +887,19 @@ def _prepare_step_test(payload: dict[str, Any]) -> tuple[str, dict[str, Any], di
     scenario = payload.get("scenario")
     if not isinstance(scenario, dict):
         raise HTTPException(status_code=400, detail="scenario is required")
-    suite = payload.get("suite")
-    if not isinstance(suite, dict):
+    collection = payload.get("collection")
+    if not isinstance(collection, dict):
+        collection = payload.get("suite")  # legacy request key
+    if not isinstance(collection, dict):
         scenario_path = payload.get("scenario_file") or payload.get("path")
         if isinstance(scenario_path, str) and scenario_path.strip():
             raw_path = Path(scenario_path)
             if not raw_path.is_absolute():
                 raw_path = ROOT / scenario_path
             if raw_path.is_file():
-                suite = discover_parent_suite(raw_path, scenario)
-    if isinstance(suite, dict):
-        scenario = apply_suite_defaults(scenario, suite)
+                collection = discover_parent_collection(raw_path, scenario)
+    if isinstance(collection, dict):
+        scenario = apply_collection_defaults(scenario, collection)
     steps = scenario.get("steps", [])
     if not isinstance(steps, list) or not steps:
         raise HTTPException(status_code=400, detail="scenario has no steps")
@@ -964,7 +987,24 @@ def _convert_imported_scenario(payload: dict[str, Any]) -> tuple[str, dict[str, 
             suggested = "insomnia_import"
         return suggested, _convert_insomnia_export(payload)
 
-    raise HTTPException(status_code=400, detail="Unsupported import file. Use Postman collection JSON or Insomnia export JSON/YAML.")
+    if is_bruno_collection(payload):
+        try:
+            scenario = convert_bruno_collection(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return bruno_suggested_name(payload), scenario
+
+    if is_openapi_document(payload):
+        try:
+            scenario = convert_openapi_document(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return openapi_suggested_name(payload), scenario
+
+    raise HTTPException(
+        status_code=400,
+        detail="Unsupported import file. Use Postman, Insomnia, Bruno collection JSON, or OpenAPI/Swagger JSON/YAML.",
+    )
 
 
 def _parse_import_payload(raw_bytes: bytes, filename: str) -> dict[str, Any]:
@@ -1022,27 +1062,21 @@ async def import_scenario(
         raise HTTPException(status_code=400, detail="Converted scenario is invalid")
 
     desired_name = scenario_name.strip() if isinstance(scenario_name, str) else ""
-    suite_id = (request.query_params.get("suite_id") or "").strip()
-    if suite_id:
-        suite = owned_suite(db, user, suite_id)
-    else:
-        suite = Suite(
-            owner_id=user.id,
-            name=str(suggested_name or "Imported"),
-            description="",
-            selected_environment="",
-            document=empty_suite_document(str(suggested_name or "Imported")),
+    collection_id = (request.query_params.get("collection_id") or request.query_params.get("suite_id") or "").strip()
+    if not collection_id:
+        raise HTTPException(
+            status_code=400,
+            detail="collection_id is required; import into an existing workspace collection",
         )
-        db.add(suite)
-        db.flush()
-    filename = unique_scenario_name(suite, desired_name or suggested_name)
-    saved = attach_scenario(db, user, suite, filename, scenario)
+    collection = owned_collection(db, user, collection_id)
+    filename = unique_scenario_name(collection, desired_name or suggested_name)
+    saved = attach_scenario(db, user, collection, filename, scenario)
     return {
         "status": "imported",
-        "name": workspace_scenario_path(suite.id, saved.name),
-        "path": workspace_scenario_path(suite.id, saved.name),
-        "suite_id": suite.id,
-        "suite_path": f"workspace/{suite.id}/suite.json",
+        "name": workspace_scenario_path(collection.id, saved.name),
+        "path": workspace_scenario_path(collection.id, saved.name),
+        "collection_id": collection.id,
+        "collection_path": workspace_collection_path(collection.id),
         "scenario": scenario,
         "step_count": len(scenario.get("steps", [])),
     }
@@ -1091,8 +1125,8 @@ def start_run(
             overrides = {}
         if workspace_run and user is not None:
             run_file = str(materialize_workspace_run(db, user, str(scenario_file), tmp_dir))
-            suite_id, _filename = parse_workspace_path(str(scenario_file))
-            stored = load_suite_env_values(db, user, suite_id, scenario_environment)
+            collection_id, _filename = parse_workspace_path(str(scenario_file))
+            stored = load_collection_env_values(db, user, collection_id, scenario_environment)
             overrides = {**stored, **{str(k): v for k, v in overrides.items()}}
         cmd = [
             str(BIN_DIR / "test.sh"),

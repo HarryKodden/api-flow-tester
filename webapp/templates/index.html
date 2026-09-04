@@ -23,7 +23,7 @@
     <header class="topbar">
       <div class="brand">
         <div class="brand-mark">Regression <span>Tester</span></div>
-        <div class="brand-sub">Suites, scenarios, one-pass runs</div>
+        <div class="brand-sub">Collections, scenarios, one-pass runs</div>
       </div>
       <div class="topbar-actions">
         <div id="auth-bar" class="auth-bar">
@@ -55,7 +55,7 @@
                   <button id="new-item" class="ghost" type="button" aria-haspopup="menu" aria-expanded="false" title="Create in your workspace">New</button>
                   <div id="new-item-menu" class="menu hidden" role="menu">
                     <button type="button" role="menuitem" data-kind="folder">Folder</button>
-                    <button type="button" role="menuitem" data-kind="suite">Suite</button>
+                    <button type="button" role="menuitem" data-kind="collection">Collection</button>
                     <button type="button" role="menuitem" data-kind="scenario">Scenario</button>
                     <p id="new-item-hint" class="menu-hint">Creates in My workspace</p>
                   </div>
@@ -68,22 +68,25 @@
         </aside>
 
         <div class="workspace-main">
-          <section id="suite-section" class="panel card hierarchy-panel">
+          <section id="collection-section" class="panel card hierarchy-panel">
             <header class="panel-head section-head">
               <div class="editor-heading">
-                <span id="editor-kind" class="kind-pill kind-suite">Suite</span>
-                <h2 id="editor-title">Suite</h2>
+                <span id="editor-kind" class="kind-pill kind-collection">Collection</span>
+                <h2 id="editor-title">Collection</h2>
               </div>
               <div class="actions">
-                <button id="copy-suite" class="ghost hidden" type="button">Copy to workspace</button>
-                <button id="delete-suite" class="ghost danger-subtle hidden" type="button">Delete Suite</button>
-                <button id="save-suite" class="ghost" type="button">Save Suite</button>
+                <button id="import-collection" class="ghost hidden" type="button">Import</button>
+                <input id="import-collection-file" type="file" accept="application/json,text/yaml,application/x-yaml,.json,.yaml,.yml" class="hidden" />
+                <button id="export-collection-bruno" class="ghost hidden" type="button">Export</button>
+                <button id="copy-collection" class="ghost hidden" type="button">Copy to workspace</button>
+                <button id="delete-collection" class="ghost danger-subtle hidden" type="button">Delete</button>
+                <button id="save-collection" class="ghost" type="button">Save</button>
               </div>
             </header>
-            <nav id="editor-crumb" class="editor-crumb" aria-label="Suite, scenario, and step">
-              <span class="muted">Open a suite from the library.</span>
+            <nav id="editor-crumb" class="editor-crumb" aria-label="Collection, scenario, and step">
+              <span class="muted">Open a collection from the library.</span>
             </nav>
-            <p id="suite-description" class="muted suite-description"></p>
+            <p id="collection-description" class="muted collection-description"></p>
             <div id="scenario-meta" class="scenario-meta grid scenario-grid-top">
               <label id="scenario-base-url-wrap" class="hidden">Base URL <input id="scenario-base-url" placeholder="http://192.168.1.10:8080" /></label>
               <label>Selected Environment
@@ -91,12 +94,12 @@
               </label>
               <label>Constants
                 <div class="json-edit-row">
-                  <button id="edit-random-generators-json" type="button" class="ghost">Edit Suite Constants</button>
+                  <button id="edit-random-generators-json" type="button" class="ghost">Edit Collection Constants</button>
                 </div>
               </label>
               <label>Environments
                 <div class="json-edit-row">
-                  <button id="edit-environments-json" type="button" class="ghost">Edit Suite Environments</button>
+                  <button id="edit-environments-json" type="button" class="ghost">Edit Collection Environments</button>
                 </div>
               </label>
             </div>
@@ -107,7 +110,7 @@
               <h4>Environment values</h4>
               <button id="clear-session-env" type="button" class="ghost">Clear</button>
             </div>
-            <p id="session-env-help" class="muted">Required values and variables with a default from the open scenario or suite. The field shows the current value; overwrite it to change this run. Library values stay in this browser session; workspace values are saved privately for this suite.</p>
+            <p id="session-env-help" class="muted">Required values and variables with a default from the open scenario or collection. The field shows the current value; overwrite it to change this run. Library values stay in this browser session; workspace values are saved privately for this collection.</p>
             <div id="session-env-fields" class="env-dialog-fields"></div>
             <p id="session-env-empty" class="muted">No environment values on the current steps.</p>
             <p id="session-env-run-hint" class="muted run-mode-hint">Run Tests stays disabled until every required field has a value.</p>
@@ -117,7 +120,7 @@
             <header class="panel-head section-head">
               <div>
                 <h2 id="run-title">Run</h2>
-                <p>One pass through the suite. Failures stop that scenario.</p>
+                <p>One pass through the collection. Failures stop that scenario.</p>
               </div>
             </header>
             <div class="grid">
@@ -143,15 +146,15 @@
             </details>
           </section>
 
-          <section id="suite-panel" class="panel card">
+          <section id="collection-panel" class="panel card">
             <header class="panel-head section-head">
               <div>
                 <h2>Scenarios</h2>
                 <p>Open a scenario to inspect steps</p>
               </div>
-              <span id="suite-member-count" class="pill">0</span>
+              <span id="collection-member-count" class="pill">0</span>
             </header>
-            <div id="suite-members" class="suite-members"></div>
+            <div id="collection-members" class="collection-members"></div>
           </section>
 
           <section id="scenario-section" class="panel card hidden">
@@ -162,8 +165,6 @@
               </div>
               <div class="actions">
                 <input id="scenario-name" type="text" placeholder="folder/test.json" />
-                <button id="import-scenario" class="ghost">Import Postman/Insomnia</button>
-                <input id="import-scenario-file" type="file" accept="application/json,text/yaml,application/x-yaml,.json,.yaml,.yml" class="hidden" />
                 <button id="add-step" class="ghost">Add Step</button>
                 <button id="delete-scenario" class="ghost danger-subtle hidden" type="button">Delete Scenario</button>
                 <button id="save-scenario" class="primary">Save Scenario</button>

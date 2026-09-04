@@ -33,7 +33,7 @@ def test_rename_folder_suite_and_scenario(client):
 
     suite = client.post(
         "/api/explorer/create",
-        json={"kind": "suite", "name": "Original", "target": renamed_folder.json()["path"]},
+        json={"kind": "collection", "name": "Original", "target": renamed_folder.json()["path"]},
     )
     assert suite.status_code == 200
     suite_path = suite.json()["path"]

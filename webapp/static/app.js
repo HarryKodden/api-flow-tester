@@ -4,22 +4,23 @@ const scenarioNameInput = document.getElementById('scenario-name');
 const editorKind = document.getElementById('editor-kind');
 const editorTitle = document.getElementById('editor-title');
 const editorCrumb = document.getElementById('editor-crumb');
-const suitePanel = document.getElementById('suite-panel');
-const suiteSection = document.getElementById('suite-section');
+const collectionPanel = document.getElementById('collection-panel');
+const collectionSection = document.getElementById('collection-section');
 const scenarioSection = document.getElementById('scenario-section');
-const saveSuiteButton = document.getElementById('save-suite');
-const copySuiteButton = document.getElementById('copy-suite');
-const deleteSuiteButton = document.getElementById('delete-suite');
+const saveCollectionButton = document.getElementById('save-collection');
+const copyCollectionButton = document.getElementById('copy-collection');
+const deleteCollectionButton = document.getElementById('delete-collection');
+const importCollectionButton = document.getElementById('import-collection');
+const importCollectionFileInput = document.getElementById('import-collection-file');
+const exportCollectionBrunoButton = document.getElementById('export-collection-bruno');
 const deleteScenarioButton = document.getElementById('delete-scenario');
-const suiteMemberCount = document.getElementById('suite-member-count');
-const suiteDescription = document.getElementById('suite-description');
-const suiteMembers = document.getElementById('suite-members');
+const collectionMemberCount = document.getElementById('collection-member-count');
+const collectionDescription = document.getElementById('collection-description');
+const collectionMembers = document.getElementById('collection-members');
 const scenarioBuilder = document.getElementById('scenario-builder');
 const addStepButton = document.getElementById('add-step');
 const saveScenarioButton = document.getElementById('save-scenario');
 const runTitle = document.getElementById('run-title');
-const importScenarioButton = document.getElementById('import-scenario');
-const importScenarioFileInput = document.getElementById('import-scenario-file');
 const scenarioBaseUrl = document.getElementById('scenario-base-url');
 const scenarioEnvironmentSelect = document.getElementById('scenario-environment');
 const editRandomGeneratorsJsonButton = document.getElementById('edit-random-generators-json');
@@ -78,16 +79,16 @@ const reportText = document.getElementById('report-text');
 const reportSummary = document.getElementById('report-summary');
 let selectedScenarioName = null;
 let selectedFolderPath = '';
-let activeSuitePath = '';
-let activeSuiteMembers = [];
-let activeSuiteDocument = null;
-let suiteMemberDocs = new Map();
-let suiteMemberDocsSuite = '';
-let suiteMemberDocsLoading = null;
+let activeCollectionPath = '';
+let activeCollectionMembers = [];
+let activeCollectionDocument = null;
+let collectionMemberDocs = new Map();
+let collectionMemberDocsCollection = '';
+let collectionMemberDocsLoading = null;
 const LAST_OPEN_STORAGE_KEY = 'lti.last.open';
 let scenarioTree = {type: 'dir', name: 'examples', path: '', children: []};
 let expandedFolders = new Set();
-let expandedSuites = new Set();
+let expandedCollections = new Set();
 let didExpandAllFolders = false;
 let currentScenario = null;
 let selectedStepIndex = -1;
@@ -114,17 +115,23 @@ function isWorkspaceFolderPath(path) {
   return raw === 'workspace' || raw.startsWith('ws-folder/');
 }
 
-function isSuiteFileName(path) {
-  return String(path || '').split('/').pop() === 'suite.json';
+function isCollectionFileName(path) {
+  const name = String(path || '').split('/').pop();
+  return name === 'collection.json' || name === 'suite.json';
 }
 
-function workspaceSuiteId(path) {
+function collectionDocumentFilename(path) {
+  const name = String(path || '').split('/').pop();
+  return name === 'suite.json' ? 'suite.json' : 'collection.json';
+}
+
+function workspaceCollectionId(path) {
   const parts = String(path || '').replaceAll('\\', '/').split('/').filter(Boolean);
   return parts[0] === 'workspace' && parts[1] ? parts[1] : '';
 }
 
-function workspaceFilePath(suiteId, filename) {
-  return `workspace/${suiteId}/${filename}`;
+function workspaceFilePath(collectionId, filename) {
+  return `workspace/${collectionId}/${filename}`;
 }
 
 function requireSignInMessage() {
@@ -177,11 +184,11 @@ function scenarioFileUrl(path) {
   return `/api/scenarios/file?path=${encodeURIComponent(path)}`;
 }
 
-function parentSuiteUrl(path) {
+function parentCollectionUrl(path) {
   if (isWorkspacePath(path)) {
-    return `/api/workspace/parent-suite?path=${encodeURIComponent(path)}`;
+    return `/api/workspace/parent-collection?path=${encodeURIComponent(path)}`;
   }
-  return `/api/scenarios/parent-suite?path=${encodeURIComponent(path)}`;
+  return `/api/scenarios/parent-collection?path=${encodeURIComponent(path)}`;
 }
 
 function expandAncestorFolders(filePath) {
@@ -218,20 +225,20 @@ function collectFolderPaths(nodes, into = new Set()) {
   return into;
 }
 
-function isSuiteNode(node) {
+function isCollectionNode(node) {
   if (!node || node.type === 'dir') {
     return false;
   }
-  return node.kind === 'suite' || (node.member_count || 0) > 0 || isSuiteFileName(node.path);
+  return node.kind === 'collection' || node.kind === 'suite' || (node.member_count || 0) > 0 || isCollectionFileName(node.path);
 }
 
-function findFirstSuiteFile(nodes) {
+function findFirstCollectionFile(nodes) {
   for (const node of nodes || []) {
-    if (node.type === 'file' && isSuiteNode(node)) {
+    if (node.type === 'file' && isCollectionNode(node)) {
       return node;
     }
     if (node.type === 'dir') {
-      const nested = findFirstSuiteFile(node.children);
+      const nested = findFirstCollectionFile(node.children);
       if (nested) {
         return nested;
       }
@@ -247,7 +254,7 @@ function svgIcon(name) {
   if (name === 'folder') {
     return '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M2.5 3.5A1.5 1.5 0 0 1 4 2h2.2c.4 0 .77.2 1 .53L8.2 4H12a1.5 1.5 0 0 1 1.5 1.5v7A1.5 1.5 0 0 1 12 14H4A1.5 1.5 0 0 1 2.5 12.5v-9z"/></svg>';
   }
-  if (name === 'suite') {
+  if (name === 'collection') {
     return '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M3 3.5h10v2H3v-2zm0 3.5h10v2H3V7zm0 3.5h10V13H3v-2z"/></svg>';
   }
   if (name === 'more') {
@@ -271,18 +278,18 @@ function findTreeNode(path, nodes = scenarioTree?.children) {
   return null;
 }
 
-function collectSuiteNodes(nodes = scenarioTree?.children, into = []) {
+function collectCollectionNodes(nodes = scenarioTree?.children, into = []) {
   for (const node of nodes || []) {
     if (node.type === 'dir') {
-      collectSuiteNodes(node.children, into);
-    } else if (isSuiteNode(node)) {
+      collectCollectionNodes(node.children, into);
+    } else if (isCollectionNode(node)) {
       into.push(node);
     }
   }
   return into;
 }
 
-function folderPathForSuite(node) {
+function folderPathForCollection(node) {
   if (!node) {
     return 'workspace';
   }
@@ -294,23 +301,23 @@ function folderPathForSuite(node) {
 
 function explorerCreateContext() {
   const selected = findTreeNode(selectedFolderPath);
-  const openSuite = findTreeNode(activeSuitePath) || findTreeNode(selectedScenarioName);
+  const openCollection = findTreeNode(activeCollectionPath) || findTreeNode(selectedScenarioName);
   let folderPath = 'workspace';
   if (selected && selected.type === 'dir' && selected.source === 'workspace') {
     folderPath = selected.path;
-  } else if (openSuite && isSuiteNode(openSuite) && isWorkspacePath(openSuite.path)) {
-    folderPath = folderPathForSuite(openSuite);
+  } else if (openCollection && isCollectionNode(openCollection) && isWorkspacePath(openCollection.path)) {
+    folderPath = folderPathForCollection(openCollection);
   }
   const folderNode = findTreeNode(folderPath);
-  const suitePath = openSuite && isSuiteNode(openSuite) && isWorkspacePath(openSuite.path)
-    ? openSuite.path
-    : (activeSuitePath && isWorkspacePath(activeSuitePath) ? activeSuitePath : '');
-  const suiteNode = suitePath ? findTreeNode(suitePath) : null;
+  const collectionPath = openCollection && isCollectionNode(openCollection) && isWorkspacePath(openCollection.path)
+    ? openCollection.path
+    : (activeCollectionPath && isWorkspacePath(activeCollectionPath) ? activeCollectionPath : '');
+  const collectionNode = collectionPath ? findTreeNode(collectionPath) : null;
   return {
     folderPath,
     folderLabel: folderNode?.name || 'My workspace',
-    suitePath,
-    suiteLabel: suiteNode?.name || fileLabel(suitePath),
+    collectionPath,
+    collectionLabel: collectionNode?.name || fileLabel(collectionPath),
   };
 }
 
@@ -320,8 +327,8 @@ function updateNewMenuHint() {
     return;
   }
   const ctx = explorerCreateContext();
-  hint.textContent = ctx.suitePath
-    ? `Suite/folder in ${ctx.folderLabel}. Scenario in ${ctx.suiteLabel}.`
+  hint.textContent = ctx.collectionPath
+    ? `Collection/folder in ${ctx.folderLabel}. Scenario in ${ctx.collectionLabel}.`
     : `Creates in ${ctx.folderLabel}`;
 }
 
@@ -331,7 +338,7 @@ function renderExplorer() {
   if (nodes.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'file-explorer-empty';
-    empty.textContent = 'No suites yet. Open the public library or copy a suite into your workspace.';
+    empty.textContent = 'No collections yet. Open the public library or copy a collection into your workspace.';
     scenarioList.appendChild(empty);
     return;
   }
@@ -397,15 +404,15 @@ function bindRowDrop(row, target) {
       return;
     }
     const canReorder = explorerDrag.kind === target.kind && explorerDrag.parent === target.parent && explorerDrag.draggable;
-    const canMoveSuite = explorerDrag.kind === 'suite' && target.kind === 'folder' && target.source === 'workspace' && isWorkspacePath(explorerDrag.path);
+    const canMoveCollection = explorerDrag.kind === 'collection' && target.kind === 'folder' && target.source === 'workspace' && isWorkspacePath(explorerDrag.path);
     const canMoveFolder = explorerDrag.kind === 'folder' && target.kind === 'folder' && target.source === 'workspace' && explorerDrag.source === 'workspace' && explorerDrag.path !== target.path && !String(target.path).startsWith(`${explorerDrag.path}/`);
-    if (!canReorder && !canMoveSuite && !canMoveFolder) {
+    if (!canReorder && !canMoveCollection && !canMoveFolder) {
       return;
     }
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
-    row.classList.toggle('drop-folder', canMoveSuite || canMoveFolder);
-    row.classList.toggle('drag-over', canReorder && !canMoveSuite && !canMoveFolder);
+    row.classList.toggle('drop-folder', canMoveCollection || canMoveFolder);
+    row.classList.toggle('drag-over', canReorder && !canMoveCollection && !canMoveFolder);
   });
   row.addEventListener('dragleave', () => {
     row.classList.remove('drag-over', 'drop-folder');
@@ -420,8 +427,8 @@ function bindRowDrop(row, target) {
       void moveFolderToFolder(explorerDrag.path, target.path);
       return;
     }
-    if (explorerDrag.kind === 'suite' && target.kind === 'folder' && target.source === 'workspace') {
-      void moveSuiteToFolder(explorerDrag.path, target.path);
+    if (explorerDrag.kind === 'collection' && target.kind === 'folder' && target.source === 'workspace') {
+      void moveCollectionToFolder(explorerDrag.path, target.path);
       return;
     }
     if (explorerDrag.kind === target.kind && explorerDrag.parent === target.parent) {
@@ -491,14 +498,14 @@ function renderTreeNodes(container, nodes, depth, parentPath) {
       return;
     }
 
-    if (!isSuiteNode(node)) {
+    if (!isCollectionNode(node)) {
       return;
     }
-    const expanded = expandedSuites.has(node.path);
-    const selected = node.path === selectedScenarioName || node.path === activeSuitePath;
-    const parent = node.source === 'workspace' ? folderPathForSuite(node) : parentPath;
+    const expanded = expandedCollections.has(node.path);
+    const selected = node.path === selectedScenarioName || node.path === activeCollectionPath;
+    const parent = node.source === 'workspace' ? folderPathForCollection(node) : parentPath;
     const target = {
-      kind: 'suite',
+      kind: 'collection',
       path: node.path,
       name: node.name,
       parent,
@@ -507,7 +514,7 @@ function renderTreeNodes(container, nodes, depth, parentPath) {
       draggable: isWorkspacePath(node.path),
     };
     const row = document.createElement('div');
-    row.className = `tree-row kind-suite${selected ? ' selected' : ''}`;
+    row.className = `tree-row kind-collection${selected ? ' selected' : ''}`;
     row.style.paddingLeft = `${8 + depth * 14}px`;
     row.title = node.path;
 
@@ -516,26 +523,26 @@ function renderTreeNodes(container, nodes, depth, parentPath) {
     chevron.className = 'tree-chevron';
     chevron.innerHTML = svgIcon('chevron');
     chevron.style.transform = expanded ? 'rotate(90deg)' : 'rotate(0deg)';
-    chevron.setAttribute('aria-label', expanded ? 'Collapse suite' : 'Expand suite');
+    chevron.setAttribute('aria-label', expanded ? 'Collapse collection' : 'Expand collection');
       chevron.addEventListener('pointerdown', stopRowGesture);
       chevron.addEventListener('mousedown', stopRowGesture);
       chevron.addEventListener('click', (event) => {
         event.stopPropagation();
-        if (expandedSuites.has(node.path)) {
-          expandedSuites.delete(node.path);
+        if (expandedCollections.has(node.path)) {
+          expandedCollections.delete(node.path);
         } else {
-          expandedSuites.add(node.path);
+          expandedCollections.add(node.path);
         }
         renderExplorer();
       });
 
     const icon = document.createElement('span');
     icon.className = 'tree-icon';
-    icon.innerHTML = svgIcon('suite');
+    icon.innerHTML = svgIcon('collection');
 
     const kind = document.createElement('span');
     kind.className = 'tree-kind';
-    kind.textContent = 'Suite';
+    kind.textContent = 'Collection';
 
     const label = document.createElement('span');
     label.className = 'tree-label';
@@ -549,8 +556,8 @@ function renderTreeNodes(container, nodes, depth, parentPath) {
 
     row.append(chevron, icon, kind, label, meta, moreButton(target));
     row.addEventListener('click', () => {
-      selectedFolderPath = folderPathForSuite(node);
-      expandedSuites.add(node.path);
+      selectedFolderPath = folderPathForCollection(node);
+      expandedCollections.add(node.path);
       void openScenario(node);
     });
     bindRowMenu(row, target);
@@ -591,7 +598,7 @@ function renderTreeNodes(container, nodes, depth, parentPath) {
 
       memberRow.append(memberIcon, memberKind, memberLabel, moreButton(memberTarget));
       memberRow.addEventListener('click', () => {
-        void openSuiteMember(node, memberName);
+        void openCollectionMember(node, memberName);
       });
       bindRowMenu(memberRow, memberTarget);
       bindRowDrag(memberRow, memberTarget, memberLabel);
@@ -668,23 +675,23 @@ function getChildEnvironments() {
   return currentScenario.environments;
 }
 
-function getSuiteEnvironments() {
-  const suiteEnvs = activeSuiteDocument?.environments;
-  if (!suiteEnvs || typeof suiteEnvs !== 'object' || Array.isArray(suiteEnvs)) {
+function getCollectionEnvironments() {
+  const collectionEnvs = activeCollectionDocument?.environments;
+  if (!collectionEnvs || typeof collectionEnvs !== 'object' || Array.isArray(collectionEnvs)) {
     return {};
   }
-  return suiteEnvs;
+  return collectionEnvs;
 }
 
 function getScenarioEnvironments() {
-  const suiteEnvs = getSuiteEnvironments();
-  if (Object.keys(suiteEnvs).length > 0 && !isSuiteScenario(currentScenario)) {
-    return suiteEnvs;
+  const collectionEnvs = getCollectionEnvironments();
+  if (Object.keys(collectionEnvs).length > 0 && !isCollectionDocument(currentScenario)) {
+    return collectionEnvs;
   }
-  if (isSuiteScenario(currentScenario)) {
+  if (isCollectionDocument(currentScenario)) {
     return getChildEnvironments();
   }
-  return Object.keys(suiteEnvs).length > 0 ? suiteEnvs : getChildEnvironments();
+  return Object.keys(collectionEnvs).length > 0 ? collectionEnvs : getChildEnvironments();
 }
 
 function getSelectedEnvironmentName() {
@@ -692,13 +699,13 @@ function getSelectedEnvironmentName() {
     return '';
   }
   const environments = getScenarioEnvironments();
-  const suiteSelected = activeSuiteDocument?.selected_environment || '';
-  const selected = currentScenario.selected_environment || suiteSelected || '';
+  const collectionSelected = activeCollectionDocument?.selected_environment || '';
+  const selected = currentScenario.selected_environment || collectionSelected || '';
   if (selected && environments[selected]) {
     return selected;
   }
-  if (suiteSelected && environments[suiteSelected]) {
-    return suiteSelected;
+  if (collectionSelected && environments[collectionSelected]) {
+    return collectionSelected;
   }
   return '';
 }
@@ -914,7 +921,7 @@ function getRawMergedEnvironment() {
   if (!selectedName) {
     return {};
   }
-  const higher = getSuiteEnvironments()[selectedName];
+  const higher = getCollectionEnvironments()[selectedName];
   const lower = getChildEnvironments()[selectedName];
   return mergeDefined(
     higher && typeof higher === 'object' ? higher : {},
@@ -988,7 +995,7 @@ function clearSessionEnvOverrides() {
 }
 
 function scheduleWorkspaceEnvPersist() {
-  if (!isWorkspacePath(activeSuitePath || selectedScenarioName || '')) {
+  if (!isWorkspacePath(activeCollectionPath || selectedScenarioName || '')) {
     return;
   }
   clearTimeout(envPersistTimer);
@@ -998,12 +1005,12 @@ function scheduleWorkspaceEnvPersist() {
 }
 
 async function persistWorkspaceEnvValues() {
-  const suiteId = workspaceSuiteId(activeSuitePath || selectedScenarioName || '');
+  const collectionId = workspaceCollectionId(activeCollectionPath || selectedScenarioName || '');
   const environment = getSelectedEnvironmentName();
-  if (!suiteId || !environment || !authState.authenticated) {
+  if (!collectionId || !environment || !authState.authenticated) {
     return;
   }
-  await api(`/api/workspace/suites/${encodeURIComponent(suiteId)}/env`, {
+  await api(`/api/workspace/collections/${encodeURIComponent(collectionId)}/env`, {
     method: 'PUT',
     body: JSON.stringify({
       environment,
@@ -1013,16 +1020,16 @@ async function persistWorkspaceEnvValues() {
 }
 
 async function loadWorkspaceEnvValues() {
-  const suiteId = workspaceSuiteId(activeSuitePath || selectedScenarioName || '');
+  const collectionId = workspaceCollectionId(activeCollectionPath || selectedScenarioName || '');
   const environment = getSelectedEnvironmentName();
-  const key = `${suiteId}::${environment || '_'}`;
-  if (!suiteId || !authState.authenticated) {
+  const key = `${collectionId}::${environment || '_'}`;
+  if (!collectionId || !authState.authenticated) {
     return;
   }
   if (key === loadedWorkspaceEnvKey) {
     return;
   }
-  const data = await api(`/api/workspace/suites/${encodeURIComponent(suiteId)}/env?environment=${encodeURIComponent(environment)}`);
+  const data = await api(`/api/workspace/collections/${encodeURIComponent(collectionId)}/env?environment=${encodeURIComponent(environment)}`);
   saveSessionEnvOverrides(data.values || {});
   loadedWorkspaceEnvKey = key;
   lastRequiredEnvNames = '';
@@ -1067,9 +1074,9 @@ function selectedEnvironmentBlock() {
   if (!name) {
     return {};
   }
-  const suiteBlock = getSuiteEnvironments()[name];
-  if (suiteBlock && typeof suiteBlock === 'object' && !Array.isArray(suiteBlock)) {
-    return suiteBlock;
+  const collectionBlock = getCollectionEnvironments()[name];
+  if (collectionBlock && typeof collectionBlock === 'object' && !Array.isArray(collectionBlock)) {
+    return collectionBlock;
   }
   const childBlock = getChildEnvironments()[name];
   return childBlock && typeof childBlock === 'object' && !Array.isArray(childBlock) ? childBlock : {};
@@ -1089,7 +1096,7 @@ function shouldPromptForEnvKey(key) {
 }
 
 function removedEnvStorageScope() {
-  return `${activeSuitePath || selectedScenarioName || '_'}::${getSelectedEnvironmentName() || '_'}`;
+  return `${activeCollectionPath || selectedScenarioName || '_'}::${getSelectedEnvironmentName() || '_'}`;
 }
 
 function loadRemovedEnvKeys() {
@@ -1159,45 +1166,62 @@ function unsetEnvironmentKeys(applySession) {
   }).sort();
 }
 
-function activeSuiteFilePath() {
-  if (activeSuitePath) {
-    return activeSuitePath;
+function activeCollectionFilePath() {
+  if (activeCollectionPath) {
+    return activeCollectionPath;
   }
-  if (isSuiteScenario(currentScenario) && selectedScenarioName) {
+  if (isCollectionDocument(currentScenario) && selectedScenarioName) {
     return selectedScenarioName;
   }
   return '';
 }
 
-function suiteMemberScenarioPaths() {
-  const suitePath = activeSuiteFilePath();
-  if (!suitePath) {
+function collectionMemberScenarioPaths() {
+  const collectionPath = activeCollectionFilePath();
+  if (!collectionPath) {
     return [];
   }
-  const members = isSuiteScenario(currentScenario)
+  const members = isCollectionDocument(currentScenario)
     ? (Array.isArray(currentScenario.scenarios) ? currentScenario.scenarios : [])
-    : activeSuiteMembers.slice();
-  const folder = parentFolderPath(suitePath);
+    : activeCollectionMembers.slice();
+  const folder = parentFolderPath(collectionPath);
   return members
     .map((name) => joinPath(folder, String(name)))
     .filter(Boolean);
 }
 
 function syncCurrentScenarioIntoMemberDocs() {
-  if (!selectedScenarioName || !currentScenario || isSuiteScenario(currentScenario)) {
+  if (!selectedScenarioName || !currentScenario || isCollectionDocument(currentScenario)) {
     return;
   }
-  suiteMemberDocs.set(selectedScenarioName, currentScenario);
+  const members = new Set(collectionMemberScenarioPaths());
+  if (members.size > 0 && !members.has(selectedScenarioName)) {
+    return;
+  }
+  collectionMemberDocs.set(selectedScenarioName, currentScenario);
+}
+
+function clearCollectionMemberDocs(collectionPath = '') {
+  collectionMemberDocs.clear();
+  collectionMemberDocsCollection = collectionPath || '';
+  lastRequiredEnvNames = '';
 }
 
 function envScanSteps() {
   syncCurrentScenarioIntoMemberDocs();
+  const allowed = new Set(collectionMemberScenarioPaths());
   const steps = [];
-  if (currentScenario && !isSuiteScenario(currentScenario) && Array.isArray(currentScenario.steps)) {
+  if (currentScenario && !isCollectionDocument(currentScenario) && Array.isArray(currentScenario.steps)) {
     steps.push(...currentScenario.steps);
   }
-  suiteMemberDocs.forEach((doc, path) => {
-    if (path === selectedScenarioName && currentScenario && !isSuiteScenario(currentScenario)) {
+  collectionMemberDocs.forEach((doc, path) => {
+    if (allowed.size > 0 && !allowed.has(path)) {
+      return;
+    }
+    if (allowed.size === 0 && path !== selectedScenarioName) {
+      return;
+    }
+    if (path === selectedScenarioName && currentScenario && !isCollectionDocument(currentScenario)) {
       return;
     }
     if (doc && Array.isArray(doc.steps)) {
@@ -1207,34 +1231,49 @@ function envScanSteps() {
   return steps;
 }
 
-async function ensureSuiteMemberDocs() {
-  const suitePath = activeSuiteFilePath();
-  const memberPaths = suiteMemberScenarioPaths();
-  if (!suitePath || memberPaths.length === 0) {
-    if (!suitePath) {
-      suiteMemberDocs.clear();
-      suiteMemberDocsSuite = '';
-    }
-    syncCurrentScenarioIntoMemberDocs();
+async function ensureCollectionMemberDocs() {
+  const collectionPath = activeCollectionFilePath();
+  const memberPaths = collectionMemberScenarioPaths();
+  if (!collectionPath) {
+    clearCollectionMemberDocs();
     return false;
   }
-  if (suiteMemberDocsSuite !== suitePath) {
-    suiteMemberDocs.clear();
-    suiteMemberDocsSuite = suitePath;
+  if (collectionMemberDocsCollection !== collectionPath) {
+    clearCollectionMemberDocs(collectionPath);
   }
+  // Drop cached scenarios that are not members of the open collection (empty collection → clear all).
+  const allowed = new Set(memberPaths);
+  [...collectionMemberDocs.keys()].forEach((path) => {
+    if (!allowed.has(path)) {
+      collectionMemberDocs.delete(path);
+    }
+  });
+  if (memberPaths.length === 0) {
+    return true;
+  }
+  collectionMemberDocsCollection = collectionPath;
   syncCurrentScenarioIntoMemberDocs();
-  const missing = memberPaths.filter((path) => !suiteMemberDocs.has(path));
+  const missing = memberPaths.filter((path) => !collectionMemberDocs.has(path));
   if (missing.length === 0) {
     return false;
   }
-  await Promise.all(missing.map(async (path) => {
+  const loaded = await Promise.all(missing.map(async (path) => {
     try {
       const document = await api(scenarioFileUrl(path));
-      suiteMemberDocs.set(path, normalizeScenario(document));
+      return [path, normalizeScenario(document)];
     } catch {
-      // Member may be missing; skip for env scanning.
+      return null;
     }
   }));
+  // Ignore results if the user already switched collections.
+  if (activeCollectionFilePath() !== collectionPath) {
+    return false;
+  }
+  loaded.forEach((entry) => {
+    if (entry) {
+      collectionMemberDocs.set(entry[0], entry[1]);
+    }
+  });
   return true;
 }
 
@@ -1416,7 +1455,7 @@ function renderRequiredEnvPanel() {
   }
   syncCurrentScenarioIntoMemberDocs();
   const names = displayedEnvironmentNames();
-  const hasOpenWork = Boolean(currentScenario) || Boolean(activeSuitePath) || names.length > 0;
+  const hasOpenWork = Boolean(currentScenario) || Boolean(activeCollectionPath) || names.length > 0;
   if (!hasOpenWork) {
     wrap.classList.add('hidden');
     fields.replaceChildren();
@@ -1501,9 +1540,9 @@ function envFieldSourceHint(name, defaults, session) {
   return '';
 }
 
-async function refreshEnvPanelFromSuiteMembers() {
+async function refreshEnvPanelFromCollectionMembers() {
   const before = displayedEnvironmentNames().join('\0');
-  const loaded = await ensureSuiteMemberDocs();
+  const loaded = await ensureCollectionMemberDocs();
   const after = displayedEnvironmentNames().join('\0');
   if (loaded || before !== after) {
     lastRequiredEnvNames = '';
@@ -1541,11 +1580,11 @@ function updateRunAvailability() {
       regressionRunButton.title = 'Run Tests';
     }
   }
-  if (suiteMemberDocsLoading) {
+  if (collectionMemberDocsLoading) {
     return;
   }
-  suiteMemberDocsLoading = refreshEnvPanelFromSuiteMembers().finally(() => {
-    suiteMemberDocsLoading = null;
+  collectionMemberDocsLoading = refreshEnvPanelFromCollectionMembers().finally(() => {
+    collectionMemberDocsLoading = null;
   });
 }
 
@@ -1663,8 +1702,8 @@ function parseRunUrl(rawUrl) {
   }
 }
 
-function viewingSuite() {
-  return isSuiteScenario(currentScenario);
+function viewingCollection() {
+  return isCollectionDocument(currentScenario);
 }
 
 function stepAbsoluteOrigin(step) {
@@ -1718,8 +1757,8 @@ function updateRunTargetHint() {
   }
   const url = requestBaseUrl();
   const envName = getSelectedEnvironmentName();
-  if (viewingSuite() && envName) {
-    runTargetHint.textContent = `Using “${envName}” from the suite editor → ${url}`;
+  if (viewingCollection() && envName) {
+    runTargetHint.textContent = `Using “${envName}” from the collection editor → ${url}`;
     return;
   }
   if (envName) {
@@ -1749,11 +1788,11 @@ function renderScenarioEnvironmentSelector() {
   });
 
   scenarioEnvironmentSelect.value = selectedName;
-  syncSuiteRunFields();
+  syncCollectionRunFields();
   updateRunTargetHint();
 }
 
-function syncSuiteRunFields() {
+function syncCollectionRunFields() {
   const hasEnvironments = Object.keys(getScenarioEnvironments()).length > 0;
   if (scenarioBaseUrlWrap) {
     scenarioBaseUrlWrap.classList.toggle('hidden', hasEnvironments);
@@ -1799,14 +1838,14 @@ function getValidatedScenarioPayload() {
   if (!Array.isArray(payload.steps)) {
     throw new Error('Scenario JSON is invalid: steps must be an array.');
   }
-  const suiteFile = Array.isArray(payload.scenarios) && payload.scenarios.length > 0 && payload.steps.length === 0;
+  const collectionFile = Array.isArray(payload.scenarios) && payload.scenarios.length > 0 && payload.steps.length === 0;
   if (payload.environments != null && (typeof payload.environments !== 'object' || Array.isArray(payload.environments))) {
     throw new Error('Scenario JSON is invalid: environments must be a JSON object.');
   }
   if (payload.random_generators != null && (typeof payload.random_generators !== 'object' || Array.isArray(payload.random_generators))) {
     throw new Error('Scenario JSON is invalid: random_generators must be a JSON object.');
   }
-  if (!suiteFile) {
+  if (!collectionFile) {
     if (!payload.environments || Object.keys(payload.environments).length === 0) {
       delete payload.environments;
     }
@@ -2000,7 +2039,7 @@ function renderStepDetail() {
     if (isAbsoluteHttpUrl(raw)) {
       stepPathResolved.textContent = resolved !== raw
         ? resolved
-        : 'Full URL — the suite base URL is not applied.';
+        : 'Full URL — the collection base URL is not applied.';
     } else {
       stepPathResolved.textContent = resolved && resolved !== raw ? resolved : '';
     }
@@ -2033,47 +2072,47 @@ function renderScenarioBuilder() {
 
 function getJsonDialogConfig(target) {
   if (target === 'environments') {
-    const editingSuiteEnv = Boolean(isSuiteScenario(currentScenario) || (activeSuiteDocument && Object.keys(getSuiteEnvironments()).length > 0));
+    const editingCollectionEnv = Boolean(isCollectionDocument(currentScenario) || (activeCollectionDocument && Object.keys(getCollectionEnvironments()).length > 0));
     return {
-      title: editingSuiteEnv ? 'Edit Suite Environments JSON' : 'Edit Environments JSON',
+      title: editingCollectionEnv ? 'Edit Collection Environments JSON' : 'Edit Environments JSON',
       fieldName: 'Environments',
       currentValue: () => getScenarioEnvironments(),
       apply: (parsed) => {
         const previous = getScenarioEnvironments();
         const next = parsed || {};
         syncRemovedEnvKeys(previous, next);
-        if (isSuiteScenario(currentScenario) || !activeSuiteDocument) {
+        if (isCollectionDocument(currentScenario) || !activeCollectionDocument) {
           currentScenario.environments = next;
         } else {
-          activeSuiteDocument.environments = next;
+          activeCollectionDocument.environments = next;
         }
         const names = Object.keys(next);
         if (!names.includes(currentScenario.selected_environment || '')) {
           currentScenario.selected_environment = '';
         }
-        if (activeSuiteDocument && names.includes(currentScenario.selected_environment || '')) {
-          activeSuiteDocument.selected_environment = currentScenario.selected_environment;
+        if (activeCollectionDocument && names.includes(currentScenario.selected_environment || '')) {
+          activeCollectionDocument.selected_environment = currentScenario.selected_environment;
         }
       },
     };
   }
   if (target === 'random_generators') {
-    const editingSuite = Boolean(isSuiteScenario(currentScenario) || activeSuiteDocument);
+    const editingCollection = Boolean(isCollectionDocument(currentScenario) || activeCollectionDocument);
     return {
-      title: editingSuite ? 'Edit Suite Constants JSON' : 'Edit Constants JSON',
+      title: editingCollection ? 'Edit Collection Constants JSON' : 'Edit Constants JSON',
       fieldName: 'Constants',
       currentValue: () => {
-        if (isSuiteScenario(currentScenario) || !activeSuiteDocument) {
+        if (isCollectionDocument(currentScenario) || !activeCollectionDocument) {
           return currentScenario?.random_generators || {};
         }
-        return activeSuiteDocument.random_generators || {};
+        return activeCollectionDocument.random_generators || {};
       },
       apply: (parsed) => {
         const next = parsed || {};
-        if (isSuiteScenario(currentScenario) || !activeSuiteDocument) {
+        if (isCollectionDocument(currentScenario) || !activeCollectionDocument) {
           currentScenario.random_generators = next;
         } else {
-          activeSuiteDocument.random_generators = next;
+          activeCollectionDocument.random_generators = next;
         }
       },
     };
@@ -2153,10 +2192,10 @@ function closeJsonDialog() {
 
 async function clonePathToWorkspace(path) {
   if (!path) {
-    throw new Error('Open a suite first');
+    throw new Error('Open a collection first');
   }
   if (isWorkspacePath(path)) {
-    return {path, id: workspaceSuiteId(path)};
+    return {path, id: workspaceCollectionId(path)};
   }
   if (!authState.authenticated) {
     throw new Error(requireSignInMessage());
@@ -2167,23 +2206,23 @@ async function clonePathToWorkspace(path) {
   });
 }
 
-async function ensureWorkspaceSuiteId() {
-  if (isWorkspacePath(activeSuitePath)) {
-    return workspaceSuiteId(activeSuitePath);
+async function ensureWorkspaceCollectionId() {
+  if (isWorkspacePath(activeCollectionPath)) {
+    return workspaceCollectionId(activeCollectionPath);
   }
-  if (activeSuitePath) {
-    const cloned = await clonePathToWorkspace(activeSuitePath);
-    activeSuitePath = cloned.path;
+  if (activeCollectionPath) {
+    const cloned = await clonePathToWorkspace(activeCollectionPath);
+    activeCollectionPath = cloned.path;
     return cloned.id;
   }
   if (!authState.authenticated) {
     throw new Error(requireSignInMessage());
   }
-  const created = await api('/api/workspace/suites', {
+  const created = await api('/api/workspace/collections', {
     method: 'POST',
     body: JSON.stringify({name: 'Untitled'}),
   });
-  activeSuitePath = created.path;
+  activeCollectionPath = created.path;
   return created.id;
 }
 
@@ -2192,12 +2231,12 @@ async function saveScenarioIfNamed() {
   if (!name || !currentScenario) {
     return;
   }
-  if (isSuiteScenario(currentScenario)) {
+  if (isCollectionDocument(currentScenario)) {
     return;
   }
-  const suiteId = await ensureWorkspaceSuiteId();
+  const collectionId = await ensureWorkspaceCollectionId();
   const filename = name.split('/').pop() || name;
-  const path = workspaceFilePath(suiteId, filename);
+  const path = workspaceFilePath(collectionId, filename);
   const payload = getValidatedScenarioPayload();
   const result = await api(scenarioFileUrl(path), {
     method: 'POST',
@@ -2208,29 +2247,29 @@ async function saveScenarioIfNamed() {
   scenarioNameInput.value = selectedScenarioName;
 }
 
-async function persistActiveSuiteDocument() {
-  if (!activeSuiteDocument) {
+async function persistActiveCollectionDocument() {
+  if (!activeCollectionDocument) {
     return;
   }
-  const suiteId = await ensureWorkspaceSuiteId();
-  const path = workspaceFilePath(suiteId, 'suite.json');
-  const suite = await api(scenarioFileUrl(path));
-  if (!suite || typeof suite !== 'object') {
+  const collectionId = await ensureWorkspaceCollectionId();
+  const path = workspaceFilePath(collectionId, collectionDocumentFilename(activeCollectionPath));
+  const collection = await api(scenarioFileUrl(path));
+  if (!collection || typeof collection !== 'object') {
     return;
   }
-  suite.environments = activeSuiteDocument.environments || {};
-  suite.random_generators = activeSuiteDocument.random_generators || {};
-  if (activeSuiteDocument.selected_environment) {
-    suite.selected_environment = activeSuiteDocument.selected_environment;
+  collection.environments = activeCollectionDocument.environments || {};
+  collection.random_generators = activeCollectionDocument.random_generators || {};
+  if (activeCollectionDocument.selected_environment) {
+    collection.selected_environment = activeCollectionDocument.selected_environment;
   }
-  if (activeSuiteDocument.description != null) {
-    suite.description = activeSuiteDocument.description;
+  if (activeCollectionDocument.description != null) {
+    collection.description = activeCollectionDocument.description;
   }
   await api(scenarioFileUrl(path), {
     method: 'POST',
-    body: JSON.stringify(suite),
+    body: JSON.stringify(collection),
   });
-  activeSuitePath = path;
+  activeCollectionPath = path;
 }
 
 function openJsonDialog(target) {
@@ -2264,7 +2303,7 @@ async function saveJsonDialog() {
     const parsed = parseOptionalJson(jsonDialogEditor.value, config.fieldName);
     config.apply(parsed);
     if (currentJsonDialogTarget === 'environments' || currentJsonDialogTarget === 'random_generators') {
-      await persistActiveSuiteDocument();
+      await persistActiveCollectionDocument();
     }
     await saveScenarioIfNamed();
     closeJsonDialog();
@@ -2452,7 +2491,7 @@ function persistLastOpen() {
   try {
     sessionStorage.setItem(LAST_OPEN_STORAGE_KEY, JSON.stringify({
       scenario: selectedScenarioName || '',
-      suite: activeSuitePath || '',
+      collection: activeCollectionPath || '',
     }));
   } catch {
     // Ignore quota / private-mode failures.
@@ -2464,10 +2503,10 @@ function restoreLastOpen() {
     const parsed = JSON.parse(sessionStorage.getItem(LAST_OPEN_STORAGE_KEY) || '{}');
     return {
       scenario: typeof parsed.scenario === 'string' ? parsed.scenario : '',
-      suite: typeof parsed.suite === 'string' ? parsed.suite : '',
+      collection: typeof parsed.collection === 'string' ? parsed.collection : (typeof parsed.suite === 'string' ? parsed.suite : ''),
     };
   } catch {
-    return {scenario: '', suite: ''};
+    return {scenario: '', collection: ''};
   }
 }
 
@@ -2483,17 +2522,17 @@ async function loadScenarios() {
   }
   renderExplorer();
   let openPath = selectedScenarioName;
-  let suitePath = activeSuitePath;
+  let collectionPath = activeCollectionPath;
   if (!openPath) {
     const last = restoreLastOpen();
     openPath = last.scenario;
-    suitePath = last.suite;
+    collectionPath = last.collection;
   }
   if (openPath) {
     try {
-      if (suitePath && suitePath !== openPath) {
-        await reopenScenarioFile(suitePath);
-        await reopenScenarioFile(openPath, {fromSuite: true});
+      if (collectionPath && collectionPath !== openPath) {
+        await reopenScenarioFile(collectionPath);
+        await reopenScenarioFile(openPath, {fromCollection: true});
         return;
       }
       await reopenScenarioFile(openPath);
@@ -2502,18 +2541,18 @@ async function loadScenarios() {
       selectedScenarioName = null;
     }
   }
-  const first = findFirstSuiteFile(scenarioTree.children);
+  const first = findFirstCollectionFile(scenarioTree.children);
   if (first) {
-    expandedSuites.add(first.path);
+    expandedCollections.add(first.path);
     await openScenario(first);
   }
 }
 
-function isSuiteScenario(scenario, path = selectedScenarioName || activeSuitePath) {
-  if (isSuiteFileName(path)) {
+function isCollectionDocument(scenario, path = selectedScenarioName || activeCollectionPath) {
+  if (isCollectionFileName(path)) {
     return true;
   }
-  return Array.isArray(scenario?.scenarios) && scenario.scenarios.length > 0 && (!Array.isArray(scenario.steps) || scenario.steps.length === 0);
+  return Array.isArray(scenario?.scenarios) && (!Array.isArray(scenario.steps) || scenario.steps.length === 0);
 }
 
 function fileLabel(path) {
@@ -2521,11 +2560,38 @@ function fileLabel(path) {
   return name.replace(/\.json$/i, '') || name;
 }
 
-function captureActiveSuiteDocument(scenario) {
-  if (!isSuiteScenario(scenario)) {
+function rememberCollectionContext(path, scenario, fromCollection) {
+  if (isCollectionDocument(scenario, path)) {
+    if (activeCollectionPath !== path || collectionMemberDocsCollection !== path) {
+      clearCollectionMemberDocs(path);
+    }
+    activeCollectionPath = path;
+    activeCollectionMembers = Array.isArray(scenario.scenarios) ? scenario.scenarios.slice() : [];
+    captureActiveCollectionDocument(scenario, path);
     return;
   }
-  activeSuiteDocument = {
+  if (fromCollection) {
+    return;
+  }
+  const fileName = String(path || '').split('/').pop();
+  const sameFolder = activeCollectionPath && parentFolderPath(path) === parentFolderPath(activeCollectionPath);
+  if (!(sameFolder && activeCollectionMembers.includes(fileName))) {
+    clearCollectionMemberDocs();
+    activeCollectionPath = '';
+    activeCollectionMembers = [];
+    activeCollectionDocument = null;
+  }
+}
+
+function hasCollectionContext() {
+  return Boolean(activeCollectionPath) || isCollectionDocument(currentScenario);
+}
+
+function captureActiveCollectionDocument(scenario, path = selectedScenarioName || activeCollectionPath) {
+  if (!isCollectionDocument(scenario, path)) {
+    return;
+  }
+  activeCollectionDocument = {
     name: scenario.name || '',
     environments: scenario.environments || {},
     random_generators: scenario.random_generators || {},
@@ -2535,53 +2601,37 @@ function captureActiveSuiteDocument(scenario) {
   };
 }
 
-function rememberSuiteContext(path, scenario, fromSuite) {
-  if (isSuiteScenario(scenario)) {
-    activeSuitePath = path;
-    activeSuiteMembers = Array.isArray(scenario.scenarios) ? scenario.scenarios.slice() : [];
-    captureActiveSuiteDocument(scenario);
-    return;
-  }
-  if (fromSuite) {
-    return;
-  }
-  const fileName = String(path || '').split('/').pop();
-  const sameFolder = activeSuitePath && parentFolderPath(path) === parentFolderPath(activeSuitePath);
-  if (!(sameFolder && activeSuiteMembers.includes(fileName))) {
-    activeSuitePath = '';
-    activeSuiteMembers = [];
-    activeSuiteDocument = null;
-  }
-}
-
-function hasSuiteContext() {
-  return Boolean(activeSuitePath) || isSuiteScenario(currentScenario);
-}
-
 function renderHierarchy() {
-  const viewingSuite = isSuiteScenario(currentScenario);
-  const hasSuite = hasSuiteContext();
+  const viewingCollection = isCollectionDocument(currentScenario);
+  const hasCollection = hasCollectionContext();
   if (editorKind) {
-    editorKind.textContent = 'Suite';
-    editorKind.className = 'kind-pill kind-suite';
+    editorKind.textContent = 'Collection';
+    editorKind.className = 'kind-pill kind-collection';
   }
   if (editorTitle) {
-    const suitePath = activeSuitePath || (viewingSuite ? selectedScenarioName : '');
-    editorTitle.textContent = currentScenario?.name || activeSuiteDocument?.name || (suitePath ? fileLabel(suitePath) : 'Suite');
+    const collectionPath = activeCollectionPath || (viewingCollection ? selectedScenarioName : '');
+    editorTitle.textContent = currentScenario?.name || activeCollectionDocument?.name || (collectionPath ? fileLabel(collectionPath) : 'Collection');
   }
-  if (copySuiteButton) {
-    const openPath = activeSuitePath || selectedScenarioName || '';
-    const canCopy = Boolean(openPath) && hasSuite && authState.authenticated;
-    copySuiteButton.classList.toggle('hidden', !canCopy || isWorkspacePath(openPath));
-    copySuiteButton.textContent = 'Copy to workspace';
+  if (copyCollectionButton) {
+    const openPath = activeCollectionPath || selectedScenarioName || '';
+    const canCopy = Boolean(openPath) && hasCollection && authState.authenticated;
+    copyCollectionButton.classList.toggle('hidden', !canCopy || isWorkspacePath(openPath));
+    copyCollectionButton.textContent = 'Copy to workspace';
   }
-  if (deleteSuiteButton) {
-    const suitePath = activeSuitePath || (viewingSuite ? selectedScenarioName : '');
-    deleteSuiteButton.classList.toggle('hidden', !suitePath || !authState.authenticated);
+  const collectionPath = activeCollectionPath || (viewingCollection ? selectedScenarioName : '');
+  const workspaceCollectionOpen = Boolean(collectionPath) && isWorkspacePath(collectionPath) && authState.authenticated;
+  if (importCollectionButton) {
+    importCollectionButton.classList.toggle('hidden', !workspaceCollectionOpen);
+  }
+  if (exportCollectionBrunoButton) {
+    exportCollectionBrunoButton.classList.toggle('hidden', !collectionPath || !authState.authenticated);
+  }
+  if (deleteCollectionButton) {
+    deleteCollectionButton.classList.toggle('hidden', !collectionPath || !authState.authenticated || !isWorkspacePath(collectionPath));
   }
   if (deleteScenarioButton) {
     const scenarioPath = selectedScenarioName || '';
-    const showScenarioDelete = Boolean(scenarioPath) && !viewingSuite && authState.authenticated;
+    const showScenarioDelete = Boolean(scenarioPath) && !viewingCollection && authState.authenticated;
     deleteScenarioButton.classList.toggle('hidden', !showScenarioDelete);
   }
   if (runTitle) {
@@ -2591,33 +2641,33 @@ function renderHierarchy() {
     saveScenarioButton.textContent = 'Save Scenario';
   }
   if (addStepButton) {
-    addStepButton.classList.toggle('hidden', viewingSuite);
+    addStepButton.classList.toggle('hidden', viewingCollection);
   }
   if (editRandomGeneratorsJsonButton) {
-    editRandomGeneratorsJsonButton.textContent = 'Edit Suite Constants';
+    editRandomGeneratorsJsonButton.textContent = 'Edit Collection Constants';
   }
   if (editEnvironmentsJsonButton) {
-    editEnvironmentsJsonButton.textContent = 'Edit Suite Environments';
+    editEnvironmentsJsonButton.textContent = 'Edit Collection Environments';
   }
-  if (viewingSuite) {
-    captureActiveSuiteDocument(currentScenario);
+  if (viewingCollection) {
+    captureActiveCollectionDocument(currentScenario);
   }
-  syncSuiteRunFields();
-  if (suiteSection) {
-    suiteSection.classList.toggle('hidden', !hasSuite);
+  syncCollectionRunFields();
+  if (collectionSection) {
+    collectionSection.classList.toggle('hidden', !hasCollection);
   }
   if (scenarioSection) {
-    scenarioSection.classList.toggle('hidden', viewingSuite || !currentScenario);
+    scenarioSection.classList.toggle('hidden', viewingCollection || !currentScenario);
   }
   if (scenarioBuilder) {
-    scenarioBuilder.classList.toggle('hidden', viewingSuite);
+    scenarioBuilder.classList.toggle('hidden', viewingCollection);
   }
-  if (suitePanel) {
-    suitePanel.classList.toggle('hidden', !hasSuite);
+  if (collectionPanel) {
+    collectionPanel.classList.toggle('hidden', !hasCollection);
   }
   renderBreadcrumb();
-  if (hasSuite) {
-    renderSuiteMembers();
+  if (hasCollection) {
+    renderCollectionMembers();
   }
   updateRunAvailability();
 }
@@ -2629,7 +2679,7 @@ function renderBreadcrumb() {
   editorCrumb.innerHTML = '';
   const path = selectedScenarioName || scenarioNameInput.value.trim();
   if (!path && !currentScenario) {
-    editorCrumb.innerHTML = '<span class="muted">Select a suite first, then a scenario in that suite.</span>';
+    editorCrumb.innerHTML = '<span class="muted">Select a collection first, then a scenario in that collection.</span>';
     return;
   }
   const parts = [];
@@ -2637,13 +2687,13 @@ function renderBreadcrumb() {
   if (folder) {
     parts.push({label: folder.split('/').pop(), title: folder});
   }
-  if (activeSuitePath && !isSuiteScenario(currentScenario)) {
+  if (activeCollectionPath && !isCollectionDocument(currentScenario)) {
     parts.push({
-      label: fileLabel(activeSuitePath),
-      title: 'Suite',
-      kind: 'suite',
+      label: fileLabel(activeCollectionPath),
+      title: 'Collection',
+      kind: 'collection',
       action: () => {
-        const node = {path: activeSuitePath, name: activeSuitePath.split('/').pop()};
+        const node = {path: activeCollectionPath, name: activeCollectionPath.split('/').pop()};
         void openScenario(node);
       },
     });
@@ -2651,8 +2701,8 @@ function renderBreadcrumb() {
   if (path) {
     parts.push({
       label: fileLabel(path),
-      title: isSuiteScenario(currentScenario) ? 'Suite' : 'Scenario',
-      kind: isSuiteScenario(currentScenario) ? 'suite' : 'scenario',
+      title: isCollectionDocument(currentScenario) ? 'Collection' : 'Scenario',
+      kind: isCollectionDocument(currentScenario) ? 'collection' : 'scenario',
       current: true,
     });
   }
@@ -2690,50 +2740,50 @@ function renderBreadcrumb() {
   });
 }
 
-function renderSuiteMembers() {
-  if (!suiteMembers) {
+function renderCollectionMembers() {
+  if (!collectionMembers) {
     return;
   }
-  suiteMembers.innerHTML = '';
-  const viewingSuite = isSuiteScenario(currentScenario);
-  const members = viewingSuite
+  collectionMembers.innerHTML = '';
+  const viewingCollection = isCollectionDocument(currentScenario);
+  const members = viewingCollection
     ? (Array.isArray(currentScenario?.scenarios) ? currentScenario.scenarios : [])
-    : activeSuiteMembers.slice();
-  if (suiteMemberCount) {
-    suiteMemberCount.textContent = `${members.length} scenario${members.length === 1 ? '' : 's'}`;
+    : activeCollectionMembers.slice();
+  if (collectionMemberCount) {
+    collectionMemberCount.textContent = `${members.length} scenario${members.length === 1 ? '' : 's'}`;
   }
-  if (suiteDescription) {
-    const text = viewingSuite
+  if (collectionDescription) {
+    const text = viewingCollection
       ? (currentScenario?.description || '')
-      : (activeSuiteDocument?.description || '');
-    suiteDescription.textContent = text || 'This suite runs the listed scenarios in order.';
+      : (activeCollectionDocument?.description || '');
+    collectionDescription.textContent = text || 'This collection runs the listed scenarios in order.';
   }
-  const suitePath = (viewingSuite ? selectedScenarioName : activeSuitePath) || '';
-  const folder = parentFolderPath(suitePath);
-  const canReorder = isWorkspacePath(suitePath);
+  const collectionPath = (viewingCollection ? selectedScenarioName : activeCollectionPath) || '';
+  const folder = parentFolderPath(collectionPath);
+  const canReorder = isWorkspacePath(collectionPath);
   members.forEach((name, index) => {
     const fileName = String(name);
     const memberPath = joinPath(folder, fileName);
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = `suite-member${memberPath === selectedScenarioName ? ' is-current' : ''}`;
+    button.className = `collection-member${memberPath === selectedScenarioName ? ' is-current' : ''}`;
     button.innerHTML = `<span>${index + 1}. ${escapeHtml(fileLabel(fileName))}</span><span class="tree-kind">Scenario</span>`;
     if (canReorder) {
       button.draggable = true;
       button.addEventListener('dragstart', (event) => {
-        explorerDrag = {kind: 'scenario', path: memberPath, parent: suitePath, draggable: true};
+        explorerDrag = {kind: 'scenario', path: memberPath, parent: collectionPath, draggable: true};
         button.classList.add('dragging');
         event.dataTransfer.effectAllowed = 'move';
         event.dataTransfer.setData('text/plain', memberPath);
       });
       button.addEventListener('dragend', () => {
         explorerDrag = null;
-        suiteMembers.querySelectorAll('.suite-member.dragging, .suite-member.drag-over').forEach((item) => {
+        collectionMembers.querySelectorAll('.collection-member.dragging, .collection-member.drag-over').forEach((item) => {
           item.classList.remove('dragging', 'drag-over');
         });
       });
       button.addEventListener('dragover', (event) => {
-        if (!explorerDrag || explorerDrag.path === memberPath || explorerDrag.parent !== suitePath) {
+        if (!explorerDrag || explorerDrag.path === memberPath || explorerDrag.parent !== collectionPath) {
           return;
         }
         event.preventDefault();
@@ -2744,34 +2794,34 @@ function renderSuiteMembers() {
         event.preventDefault();
         button.classList.remove('drag-over');
         if (explorerDrag) {
-          void reorderDropped(explorerDrag, {kind: 'scenario', path: memberPath, parent: suitePath});
+          void reorderDropped(explorerDrag, {kind: 'scenario', path: memberPath, parent: collectionPath});
         }
       });
     }
     button.addEventListener('click', () => {
-      void openScenario({path: memberPath, name: fileName}, {fromSuite: true});
+      void openScenario({path: memberPath, name: fileName}, {fromCollection: true});
     });
-    suiteMembers.appendChild(button);
+    collectionMembers.appendChild(button);
   });
 }
 
-async function openSuiteMember(suiteNode, memberName) {
-  if (!suiteNode?.path || !memberName) {
+async function openCollectionMember(collectionNode, memberName) {
+  if (!collectionNode?.path || !memberName) {
     return;
   }
-  expandedSuites.add(suiteNode.path);
-  if (activeSuitePath !== suiteNode.path || !activeSuiteDocument) {
-    await openScenario(suiteNode);
+  expandedCollections.add(collectionNode.path);
+  if (activeCollectionPath !== collectionNode.path || !activeCollectionDocument) {
+    await openScenario(collectionNode);
   }
-  const memberPath = joinPath(parentFolderPath(suiteNode.path), memberName);
-  await openScenario({path: memberPath, name: memberName}, {fromSuite: true});
+  const memberPath = joinPath(parentFolderPath(collectionNode.path), memberName);
+  await openScenario({path: memberPath, name: memberName}, {fromCollection: true});
 }
 
 async function openScenario(item, options = {}) {
   const scenario = await api(scenarioFileUrl(item.path));
   selectedScenarioName = item.path;
-  const suiteNode = isSuiteNode(item) ? item : findTreeNode(activeSuitePath);
-  selectedFolderPath = suiteNode ? folderPathForSuite(suiteNode) : parentFolderPath(item.path);
+  const collectionNode = isCollectionNode(item) ? item : findTreeNode(activeCollectionPath);
+  selectedFolderPath = collectionNode ? folderPathForCollection(collectionNode) : parentFolderPath(item.path);
   expandAncestorFolders(item.path);
   scenarioNameInput.value = item.path;
   currentScenario = normalizeScenario(scenario);
@@ -2781,19 +2831,19 @@ async function openScenario(item, options = {}) {
   lastStepContextVars = {};
   lastHydratedCurlKey = '';
   selectedStepIndex = currentScenario.steps.length > 0 ? 0 : -1;
-  rememberSuiteContext(item.path, currentScenario, Boolean(options?.fromSuite));
-  if (isSuiteScenario(currentScenario)) {
-    expandedSuites.add(item.path);
-  } else if (activeSuitePath) {
-    expandedSuites.add(activeSuitePath);
+  rememberCollectionContext(item.path, currentScenario, Boolean(options?.fromCollection));
+  if (isCollectionDocument(currentScenario)) {
+    expandedCollections.add(item.path);
+  } else if (activeCollectionPath) {
+    expandedCollections.add(activeCollectionPath);
   }
-  if (!isSuiteScenario(currentScenario) && !options.fromSuite) {
+  if (!isCollectionDocument(currentScenario) && !options.fromCollection) {
     try {
-      const inherited = await api(parentSuiteUrl(item.path));
+      const inherited = await api(parentCollectionUrl(item.path));
       if (inherited?.status === 'ok' && inherited.environments) {
-        activeSuitePath = inherited.path || '';
-        activeSuiteMembers = Array.isArray(inherited.scenarios) ? inherited.scenarios : [];
-        activeSuiteDocument = {
+        activeCollectionPath = inherited.path || '';
+        activeCollectionMembers = Array.isArray(inherited.scenarios) ? inherited.scenarios : [];
+        activeCollectionDocument = {
           environments: inherited.environments || {},
           random_generators: inherited.random_generators || {},
           selected_environment: inherited.selected_environment || '',
@@ -2802,11 +2852,11 @@ async function openScenario(item, options = {}) {
         };
       }
     } catch {
-      // Scenario can still open without a parent suite.
+      // Scenario can still open without a parent collection.
     }
   }
   persistLastOpen();
-  if (isWorkspacePath(activeSuitePath || item.path)) {
+  if (isWorkspacePath(activeCollectionPath || item.path)) {
     loadedWorkspaceEnvKey = '';
     try {
       await loadWorkspaceEnvValues();
@@ -2818,18 +2868,18 @@ async function openScenario(item, options = {}) {
   renderScenarioBuilder();
 }
 
-async function saveSuite() {
+async function saveCollection() {
   try {
-    if (isSuiteScenario(currentScenario)) {
-      const sourcePath = activeSuitePath || selectedScenarioName;
+    if (isCollectionDocument(currentScenario)) {
+      const sourcePath = activeCollectionPath || selectedScenarioName;
       if (!sourcePath) {
-        alert('Open a suite first');
+        alert('Open a collection first');
         return;
       }
-      const suiteId = isWorkspacePath(sourcePath)
-        ? workspaceSuiteId(sourcePath)
+      const collectionId = isWorkspacePath(sourcePath)
+        ? workspaceCollectionId(sourcePath)
         : (await clonePathToWorkspace(sourcePath)).id;
-      const path = workspaceFilePath(suiteId, 'suite.json');
+      const path = workspaceFilePath(collectionId, collectionDocumentFilename(sourcePath));
       const parsed = getValidatedScenarioPayload();
       await api(scenarioFileUrl(path), {
         method: 'POST',
@@ -2837,20 +2887,20 @@ async function saveSuite() {
       });
       currentScenario = parsed;
       selectedScenarioName = path;
-      activeSuitePath = path;
+      activeCollectionPath = path;
       selectedFolderPath = parentFolderPath(path);
-      captureActiveSuiteDocument(currentScenario);
+      captureActiveCollectionDocument(currentScenario);
       await persistWorkspaceEnvValues();
       await loadScenarios();
       if (runOutput) {
-        runOutput.textContent = 'Suite saved to your workspace.';
+        runOutput.textContent = 'Collection saved to your workspace.';
       }
       return;
     }
-    await persistActiveSuiteDocument();
+    await persistActiveCollectionDocument();
     await persistWorkspaceEnvValues();
     if (runOutput) {
-      runOutput.textContent = 'Suite saved to your workspace.';
+      runOutput.textContent = 'Collection saved to your workspace.';
     }
   } catch (error) {
     alert(error.message || String(error));
@@ -2876,11 +2926,11 @@ async function saveScenario() {
   }
 }
 
-async function copyOpenSuiteToWorkspace() {
-  const source = activeSuitePath || selectedScenarioName;
+async function copyOpenCollectionToWorkspace() {
+  const source = activeCollectionPath || selectedScenarioName;
   const cloned = await clonePathToWorkspace(source);
   expandedFolders.add('workspace');
-  expandedSuites.add(cloned.path);
+  expandedCollections.add(cloned.path);
   await loadScenarios();
   await reopenScenarioFile(cloned.path);
   if (runOutput) {
@@ -2891,39 +2941,37 @@ async function copyOpenSuiteToWorkspace() {
 function resetOpenDocuments() {
   selectedScenarioName = null;
   selectedFolderPath = '';
-  activeSuitePath = '';
-  activeSuiteMembers = [];
-  activeSuiteDocument = null;
-  suiteMemberDocs.clear();
-  suiteMemberDocsSuite = '';
+  activeCollectionPath = '';
+  activeCollectionMembers = [];
+  activeCollectionDocument = null;
+  clearCollectionMemberDocs();
   currentScenario = null;
   selectedStepIndex = -1;
   lastStepContextVars = {};
   lastHydratedCurlKey = '';
   loadedWorkspaceEnvKey = '';
-  lastRequiredEnvNames = '';
 }
 
 async function deletePath(path) {
   return api(`/api/workspace/item?path=${encodeURIComponent(path)}`, {method: 'DELETE'});
 }
 
-async function deleteOpenSuite() {
-  const path = activeSuitePath || selectedScenarioName;
+async function deleteOpenCollection() {
+  const path = activeCollectionPath || selectedScenarioName;
   if (!path) {
-    alert('Open a suite first');
+    alert('Open a collection first');
     return;
   }
-  const label = currentScenario?.name || activeSuiteDocument?.name || fileLabel(path);
-  if (!window.confirm(`Delete suite “${label}”? This cannot be undone.`)) {
+  const label = currentScenario?.name || activeCollectionDocument?.name || fileLabel(path);
+  if (!window.confirm(`Delete “${label}”? This cannot be undone.`)) {
     return;
   }
   try {
-    await deletePath(isWorkspacePath(path) ? workspaceFilePath(workspaceSuiteId(path), 'suite.json') : path);
+    await deletePath(isWorkspacePath(path) ? workspaceFilePath(workspaceCollectionId(path), collectionDocumentFilename(path)) : path);
     resetOpenDocuments();
     await loadScenarios();
     if (runOutput) {
-      runOutput.textContent = 'Suite deleted.';
+      runOutput.textContent = 'Collection deleted.';
     }
   } catch (error) {
     alert(error.message || String(error));
@@ -2932,7 +2980,7 @@ async function deleteOpenSuite() {
 
 async function deleteOpenScenario() {
   const path = selectedScenarioName;
-  if (!path || isSuiteScenario(currentScenario)) {
+  if (!path || isCollectionDocument(currentScenario)) {
     alert('Open a scenario first');
     return;
   }
@@ -2946,9 +2994,9 @@ async function deleteOpenScenario() {
     currentScenario = null;
     selectedStepIndex = -1;
     await loadScenarios();
-    const suitePath = result.suite_path || activeSuitePath;
-    if (suitePath) {
-      await reopenScenarioFile(suitePath);
+    const collectionPath = result.collection_path || result.suite_path || activeCollectionPath;
+    if (collectionPath) {
+      await reopenScenarioFile(collectionPath);
     }
     if (runOutput) {
       runOutput.textContent = 'Scenario deleted.';
@@ -2958,21 +3006,21 @@ async function deleteOpenScenario() {
   }
 }
 
-async function copyOpenSuite() {
+async function copyOpenCollection() {
   try {
-    const source = activeSuitePath || selectedScenarioName;
+    const source = activeCollectionPath || selectedScenarioName;
     if (!source) {
-      alert('Open a suite first');
+      alert('Open a collection first');
       return;
     }
     if (isWorkspacePath(source)) {
-      alert('This suite is already in your workspace.');
+      alert('This collection is already in your workspace.');
       return;
     }
     if (!authState.authenticated) {
       throw new Error(requireSignInMessage());
     }
-    await copyOpenSuiteToWorkspace();
+    await copyOpenCollectionToWorkspace();
   } catch (error) {
     alert(error.message || String(error));
   }
@@ -3068,7 +3116,7 @@ function explorerMenuItems(target) {
   const items = [];
   if (target.kind === 'folder') {
     if (target.source === 'workspace') {
-      items.push({label: 'New suite', action: () => createExplorerItem('suite', target.path)});
+      items.push({label: 'New collection', action: () => createExplorerItem('collection', target.path)});
       items.push({label: 'New folder', action: () => createExplorerItem('folder', target.path)});
       if (target.path.startsWith('ws-folder/')) {
         items.push({label: 'Rename', action: () => renameExplorerItem(target)});
@@ -3081,21 +3129,24 @@ function explorerMenuItems(target) {
     }
     return items;
   }
-  if (target.kind === 'suite') {
+  if (target.kind === 'collection') {
+    items.push({label: 'Export', action: () => exportCollectionForBruno(target.path)});
+    items.push({label: 'Share…', action: () => shareCollectionWithUser(target.path)});
     if (isWorkspacePath(target.path)) {
+      items.push({label: 'Import…', action: () => startCollectionImport(target.path)});
       items.push({label: 'New scenario', action: () => createExplorerItem('scenario', target.path)});
       items.push({label: 'Rename', action: () => renameExplorerItem(target)});
       items.push({separator: true, label: 'Order'});
-      items.push({label: 'Move up', action: () => reorderByDelta('suites', target.parent, target.path, -1)});
-      items.push({label: 'Move down', action: () => reorderByDelta('suites', target.parent, target.path, 1)});
+      items.push({label: 'Move up', action: () => reorderByDelta('collections', target.parent, target.path, -1)});
+      items.push({label: 'Move down', action: () => reorderByDelta('collections', target.parent, target.path, 1)});
       items.push({separator: true});
-      items.push({label: 'Delete suite', danger: true, action: () => deleteExplorerSuite(target.path)});
+      items.push({label: 'Delete', danger: true, action: () => deleteExplorerCollection(target.path)});
     } else {
-      items.push({label: 'Copy to workspace', action: () => copySuitePath(target.path)});
+      items.push({label: 'Copy to workspace', action: () => copyCollectionPath(target.path)});
     }
     return items;
   }
-  items.push({label: 'Copy to another suite…', action: () => copyScenarioToSuite(target.path, target.parent)});
+  items.push({label: 'Copy to another collection…', action: () => copyScenarioToCollection(target.path, target.parent)});
   if (isWorkspacePath(target.path)) {
     items.push({label: 'Rename', action: () => renameExplorerItem(target)});
     items.push({separator: true, label: 'Order'});
@@ -3111,12 +3162,12 @@ function siblingPaths(kind, parent) {
   if (kind === 'folders') {
     return (findTreeNode(parent)?.children || []).filter((node) => node.type === 'dir').map((node) => node.path);
   }
-  if (kind === 'suites') {
-    return (findTreeNode(parent)?.children || []).filter((node) => isSuiteNode(node)).map((node) => node.path);
+  if (kind === 'collections') {
+    return (findTreeNode(parent)?.children || []).filter((node) => isCollectionNode(node)).map((node) => node.path);
   }
-  const suite = findTreeNode(parent);
+  const collection = findTreeNode(parent);
   const folder = parentFolderPath(parent);
-  return (suite?.members || []).map((name) => joinPath(folder, name));
+  return (collection?.members || []).map((name) => joinPath(folder, name));
 }
 
 function movePath(items, path, deltaOrBefore) {
@@ -3165,7 +3216,7 @@ async function reorderByDelta(kind, parent, path, delta) {
 }
 
 async function reorderDropped(source, target) {
-  const kind = source.kind === 'folder' ? 'folders' : source.kind === 'suite' ? 'suites' : 'scenarios';
+  const kind = source.kind === 'folder' ? 'folders' : source.kind === 'collection' ? 'collections' : 'scenarios';
   const next = movePath(siblingPaths(kind, source.parent), source.path, target.path);
   if (!next) {
     return;
@@ -3177,9 +3228,9 @@ async function reorderDropped(source, target) {
   }
 }
 
-async function moveSuiteToFolder(path, destination) {
+async function moveCollectionToFolder(path, destination) {
   try {
-    await api('/api/explorer/move-suite', {
+    await api('/api/explorer/move-collection', {
       method: 'POST',
       body: JSON.stringify({path, destination}),
     });
@@ -3206,6 +3257,10 @@ async function moveFolderToFolder(path, destination) {
 
 function closeAskDialog(value) {
   const dialog = document.getElementById('ask-dialog');
+  const confirm = document.getElementById('ask-dialog-confirm');
+  if (confirm) {
+    confirm.disabled = false;
+  }
   if (dialog) {
     dialog.classList.add('hidden');
   }
@@ -3216,7 +3271,7 @@ function closeAskDialog(value) {
   }
 }
 
-function askUser({title, help = '', value = '', confirmLabel = 'OK', options = null}) {
+function askUser({title, help = '', value = '', confirmLabel = 'OK', options = null, emptyLabel = 'Nothing to choose.'}) {
   const dialog = document.getElementById('ask-dialog');
   const titleEl = document.getElementById('ask-dialog-title');
   const helpEl = document.getElementById('ask-dialog-help');
@@ -3242,21 +3297,25 @@ function askUser({title, help = '', value = '', confirmLabel = 'OK', options = n
       if (options.length === 0) {
         const empty = document.createElement('p');
         empty.className = 'muted';
-        empty.textContent = 'Copy a suite into your workspace first.';
+        empty.textContent = emptyLabel;
         list.appendChild(empty);
-      }
-      options.forEach((option) => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = `picker-item${option.value === askDialogValue ? ' is-active' : ''}`;
-        button.textContent = option.label;
-        button.addEventListener('click', () => {
-          askDialogValue = option.value;
-          list.querySelectorAll('.picker-item').forEach((el) => el.classList.toggle('is-active', el === button));
+        confirm.disabled = true;
+      } else {
+        confirm.disabled = false;
+        options.forEach((option) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = `picker-item${option.value === askDialogValue ? ' is-active' : ''}`;
+          button.textContent = option.label;
+          button.addEventListener('click', () => {
+            askDialogValue = option.value;
+            list.querySelectorAll('.picker-item').forEach((el) => el.classList.toggle('is-active', el === button));
+          });
+          list.appendChild(button);
         });
-        list.appendChild(button);
-      });
+      }
     } else {
+      confirm.disabled = false;
       inputWrap.classList.remove('hidden');
       list.classList.add('hidden');
       list.innerHTML = '';
@@ -3277,14 +3336,14 @@ async function createExplorerItem(kind, explicitTarget) {
     return;
   }
   const ctx = explorerCreateContext();
-  if (kind === 'scenario' && !explicitTarget && !ctx.suitePath) {
-    const suiteName = await askUser({
-      title: 'New suite',
-      help: 'No workspace suite is selected, so a suite will be created first.',
+  if (kind === 'scenario' && !explicitTarget && !ctx.collectionPath) {
+    const collectionName = await askUser({
+      title: 'New collection',
+      help: 'No workspace collection is selected, so a collection will be created first.',
       value: 'Untitled',
       confirmLabel: 'Continue',
     });
-    if (!suiteName) {
+    if (!collectionName) {
       return;
     }
     const scenarioName = await askUser({
@@ -3296,18 +3355,18 @@ async function createExplorerItem(kind, explicitTarget) {
       return;
     }
     try {
-      const suite = await api('/api/explorer/create', {
+      const collection = await api('/api/explorer/create', {
         method: 'POST',
-        body: JSON.stringify({kind: 'suite', name: suiteName, target: ctx.folderPath}),
+        body: JSON.stringify({kind: 'collection', name: collectionName, target: ctx.folderPath}),
       });
       const created = await api('/api/explorer/create', {
         method: 'POST',
-        body: JSON.stringify({kind: 'scenario', name: scenarioName, target: suite.path}),
+        body: JSON.stringify({kind: 'scenario', name: scenarioName, target: collection.path}),
       });
       expandedFolders.add(ctx.folderPath);
-      expandedSuites.add(suite.path);
+      expandedCollections.add(collection.path);
       await loadScenarios();
-      await reopenScenarioFile(created.path, {fromSuite: true});
+      await reopenScenarioFile(created.path, {fromCollection: true});
     } catch (error) {
       alert(error.message || String(error));
     }
@@ -3319,15 +3378,15 @@ async function createExplorerItem(kind, explicitTarget) {
   const folderLabel = findTreeNode(folderTarget)?.name || ctx.folderLabel || 'My workspace';
   const defaults = {
     folder: {title: 'New folder', value: 'folder', help: `Adds a folder in ${folderLabel}.`},
-    suite: {title: 'New suite', value: 'Untitled', help: `Adds a suite in ${folderLabel}.`},
-    scenario: {title: 'New scenario', value: 'new_scenario', help: `Adds a scenario to ${fileLabel(explicitTarget || ctx.suiteLabel)}.`},
+    collection: {title: 'New collection', value: 'Untitled', help: `Adds a collection in ${folderLabel}.`},
+    scenario: {title: 'New scenario', value: 'new_scenario', help: `Adds a scenario to ${fileLabel(explicitTarget || ctx.collectionLabel)}.`},
   };
   const name = await askUser({...defaults[kind], confirmLabel: 'Create'});
   if (!name) {
     return;
   }
   const target = kind === 'scenario'
-    ? (explicitTarget || ctx.suitePath)
+    ? (explicitTarget || ctx.collectionPath)
     : folderTarget;
   try {
     const created = await api('/api/explorer/create', {
@@ -3341,40 +3400,41 @@ async function createExplorerItem(kind, explicitTarget) {
       await loadScenarios();
       return;
     }
-    if (kind === 'suite') {
+    if (kind === 'collection') {
       expandedFolders.add(target);
-      expandedSuites.add(created.path);
+      expandedCollections.add(created.path);
       await loadScenarios();
       await reopenScenarioFile(created.path);
       return;
     }
-    expandedSuites.add(created.suite_path || target);
+    expandedCollections.add(created.collection_path || created.suite_path || target);
     await loadScenarios();
-    if (created.suite_path) {
-      await reopenScenarioFile(created.suite_path);
+    if (created.collection_path || created.suite_path) {
+      await reopenScenarioFile(created.collection_path || created.suite_path);
     }
-    await reopenScenarioFile(created.path, {fromSuite: true});
+    await reopenScenarioFile(created.path, {fromCollection: true});
   } catch (error) {
     alert(error.message || String(error));
   }
 }
 
-async function copyScenarioToSuite(source, currentSuitePath) {
+async function copyScenarioToCollection(source, currentCollectionPath) {
   if (!authState.authenticated) {
     alert(requireSignInMessage());
     return;
   }
-  const options = collectSuiteNodes()
-    .filter((node) => isWorkspacePath(node.path) && node.path !== currentSuitePath)
+  const options = collectCollectionNodes()
+    .filter((node) => isWorkspacePath(node.path) && node.path !== currentCollectionPath)
     .map((node) => ({
       value: node.path,
       label: node.folder ? `${node.folder} / ${node.name}` : node.name,
     }));
   const destination = await askUser({
     title: 'Copy scenario',
-    help: options.length ? 'Choose a workspace suite.' : '',
+    help: options.length ? 'Choose a workspace collection.' : '',
     confirmLabel: 'Copy',
     options,
+    emptyLabel: 'Copy a collection into your workspace first.',
   });
   if (!destination) {
     return;
@@ -3384,10 +3444,10 @@ async function copyScenarioToSuite(source, currentSuitePath) {
       method: 'POST',
       body: JSON.stringify({source, destination}),
     });
-    expandedSuites.add(copied.suite_path || destination);
+    expandedCollections.add(copied.collection_path || copied.suite_path || destination);
     await loadScenarios();
-    await reopenScenarioFile(copied.suite_path || destination);
-    await reopenScenarioFile(copied.path, {fromSuite: true});
+    await reopenScenarioFile(copied.collection_path || copied.suite_path || destination);
+    await reopenScenarioFile(copied.path, {fromCollection: true});
     if (runOutput) {
       runOutput.textContent = 'Scenario copied.';
     }
@@ -3396,21 +3456,111 @@ async function copyScenarioToSuite(source, currentSuitePath) {
   }
 }
 
-async function copySuitePath(path) {
+async function copyCollectionPath(path) {
   try {
     if (!authState.authenticated) {
       throw new Error(requireSignInMessage());
     }
     if (isWorkspacePath(path)) {
-      throw new Error('This suite is already in your workspace.');
+      throw new Error('This collection is already in your workspace.');
     }
     const cloned = await clonePathToWorkspace(path);
     expandedFolders.add('workspace');
-    expandedSuites.add(cloned.path);
+    expandedCollections.add(cloned.path);
     await loadScenarios();
     await reopenScenarioFile(cloned.path);
     if (runOutput) {
       runOutput.textContent = 'Copied to your workspace.';
+    }
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+function userPickerLabel(user) {
+  const name = String(user?.name || '').trim();
+  const email = String(user?.email || '').trim();
+  if (name && email) {
+    return `${name} (${email})`;
+  }
+  return name || email || String(user?.id || 'User');
+}
+
+async function shareCollectionWithUser(path) {
+  try {
+    if (!authState.authenticated) {
+      throw new Error(requireSignInMessage());
+    }
+    const data = await api('/api/users');
+    const options = (data.users || []).map((user) => ({
+      value: user.id,
+      label: userPickerLabel(user),
+    }));
+    const userId = await askUser({
+      title: 'Share collection',
+      help: options.length
+        ? 'Choose a user. A copy is added to their workspace.'
+        : 'No other registered users are available to share with.',
+      confirmLabel: 'Share',
+      options,
+      emptyLabel: 'No other registered users.',
+    });
+    if (!userId) {
+      return;
+    }
+    const shared = await api('/api/explorer/share-collection', {
+      method: 'POST',
+      body: JSON.stringify({path, user_id: userId}),
+    });
+    if (runOutput) {
+      runOutput.textContent = `Shared “${shared.name || fileLabel(path)}” with ${shared.recipient_name || 'user'}.`;
+    }
+  } catch (error) {
+    alert(error.message || String(error));
+  }
+}
+
+function filenameFromContentDisposition(header) {
+  const value = String(header || '');
+  const utf = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(value);
+  if (utf) {
+    try {
+      return decodeURIComponent(utf[1].trim());
+    } catch (_error) {
+      return utf[1].trim();
+    }
+  }
+  const plain = /filename\s*=\s*"([^"]+)"/i.exec(value) || /filename\s*=\s*([^;]+)/i.exec(value);
+  return plain ? plain[1].trim() : '';
+}
+
+async function exportCollectionForBruno(path) {
+  try {
+    if (!authState.authenticated) {
+      throw new Error(requireSignInMessage());
+    }
+    const url = `/api/explorer/export-bruno?path=${encodeURIComponent(path)}&_=${Date.now()}`;
+    const response = await fetch(url, {cache: 'no-store', credentials: 'same-origin'});
+    if (response.status === 401 && authState.oidc_enabled) {
+      window.location.href = '/login';
+      throw new Error('Sign in required');
+    }
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(body || `Export failed: ${response.status}`);
+    }
+    const blob = await response.blob();
+    const filename = filenameFromContentDisposition(response.headers.get('Content-Disposition')) || 'collection.bruno.json';
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+    if (runOutput) {
+      runOutput.textContent = `Exported ${filename} for Bruno import.`;
     }
   } catch (error) {
     alert(error.message || String(error));
@@ -3474,21 +3624,21 @@ async function renameExplorerItem(target) {
         }
       }
     }
-    if (target.kind === 'suite') {
-      if (activeSuiteDocument) {
-        activeSuiteDocument.name = renamed.name;
+    if (target.kind === 'collection') {
+      if (activeCollectionDocument) {
+        activeCollectionDocument.name = renamed.name;
       }
-      if (currentScenario && isSuiteScenario(currentScenario) && (activeSuitePath === target.path || selectedScenarioName === target.path)) {
+      if (currentScenario && isCollectionDocument(currentScenario) && (activeCollectionPath === target.path || selectedScenarioName === target.path)) {
         currentScenario.name = renamed.name;
       }
     }
     await loadScenarios();
-    if (renamed.kind === 'suite') {
-      if (activeSuitePath === renamed.path || selectedScenarioName === renamed.path) {
+    if (renamed.kind === 'collection') {
+      if (activeCollectionPath === renamed.path || selectedScenarioName === renamed.path) {
         await reopenScenarioFile(renamed.path);
       }
     } else if (renamed.kind === 'scenario' && selectedScenarioName === renamed.path) {
-      await reopenScenarioFile(renamed.path, {fromSuite: true});
+      await reopenScenarioFile(renamed.path, {fromCollection: true});
     }
     if (runOutput) {
       runOutput.textContent = `Renamed to ${renamed.name}.`;
@@ -3513,14 +3663,14 @@ async function deleteExplorerFolder(target) {
   }
 }
 
-async function deleteExplorerSuite(path) {
+async function deleteExplorerCollection(path) {
   const label = findTreeNode(path)?.name || fileLabel(path);
-  if (!window.confirm(`Delete suite “${label}”? This cannot be undone.`)) {
+  if (!window.confirm(`Delete “${label}”? This cannot be undone.`)) {
     return;
   }
   try {
-    await deletePath(isWorkspacePath(path) ? workspaceFilePath(workspaceSuiteId(path), 'suite.json') : path);
-    if (activeSuitePath === path || selectedScenarioName === path) {
+    await deletePath(isWorkspacePath(path) ? workspaceFilePath(workspaceCollectionId(path), collectionDocumentFilename(path)) : path);
+    if (activeCollectionPath === path || selectedScenarioName === path) {
       resetOpenDocuments();
     }
     await loadScenarios();
@@ -3542,8 +3692,8 @@ async function deleteExplorerScenario(path) {
       selectedStepIndex = -1;
     }
     await loadScenarios();
-    if (result.suite_path) {
-      await reopenScenarioFile(result.suite_path);
+    if (result.collection_path || result.suite_path) {
+      await reopenScenarioFile(result.collection_path || result.suite_path);
     }
   } catch (error) {
     alert(error.message || String(error));
@@ -3554,27 +3704,53 @@ function startNewScenario() {
   void createExplorerItem('scenario');
 }
 
-async function importScenarioFromFile(file) {
+let pendingImportCollectionPath = '';
+
+function startCollectionImport(collectionPath) {
+  const path = String(collectionPath || activeCollectionPath || '').trim();
+  if (!path) {
+    alert('Open a workspace collection before importing.');
+    return;
+  }
+  if (!isWorkspacePath(path)) {
+    alert('Import is only available for workspace collections. Copy the collection to your workspace first.');
+    return;
+  }
+  if (!authState.authenticated) {
+    alert(requireSignInMessage());
+    return;
+  }
+  if (!importCollectionFileInput) {
+    return;
+  }
+  pendingImportCollectionPath = path;
+  importCollectionFileInput.value = '';
+  importCollectionFileInput.click();
+}
+
+async function importCollectionFromFile(file, collectionPath) {
   if (!file) {
+    return;
+  }
+  const path = String(collectionPath || pendingImportCollectionPath || activeCollectionPath || '').trim();
+  const collectionId = workspaceCollectionId(path);
+  if (!collectionId) {
+    alert('Import is only available on a workspace collection.');
     return;
   }
 
   const form = new FormData();
   form.append('file', file);
 
-  const desiredName = scenarioNameInput.value.trim();
-  if (desiredName) {
-    form.append('scenario_name', desiredName);
+  if (importCollectionButton) {
+    importCollectionButton.disabled = true;
+  }
+  if (runOutput) {
+    runOutput.textContent = 'Importing into collection...';
   }
 
-  importScenarioButton.disabled = true;
-  runOutput.textContent = 'Importing scenario...';
-
   try {
-    const suiteId = workspaceSuiteId(activeSuitePath);
-    const importUrl = suiteId
-      ? `/api/scenarios/import/file?suite_id=${encodeURIComponent(suiteId)}`
-      : '/api/scenarios/import/file';
+    const importUrl = `/api/scenarios/import/file?collection_id=${encodeURIComponent(collectionId)}`;
     const response = await fetch(importUrl, {
       method: 'POST',
       credentials: 'same-origin',
@@ -3587,18 +3763,30 @@ async function importScenarioFromFile(file) {
     }
 
     const result = await response.json();
-    scenarioNameInput.value = result.name;
-    selectedScenarioName = result.name;
-    currentScenario = normalizeScenario(result.scenario || {});
-    selectedStepIndex = currentScenario.steps.length > 0 ? 0 : -1;
-    renderScenarioBuilder();
     await loadScenarios();
-    runOutput.textContent = `Imported ${result.name} with ${result.step_count} steps.`;
+    const openPath = result.path || result.name;
+    if (openPath) {
+      await reopenScenarioFile(openPath);
+    } else if (path) {
+      await reopenScenarioFile(path);
+    }
+    if (runOutput) {
+      runOutput.textContent = `Imported ${fileLabel(openPath || result.name || 'scenario')} with ${result.step_count} steps.`;
+    }
   } catch (error) {
-    runOutput.textContent = String(error);
+    if (runOutput) {
+      runOutput.textContent = String(error);
+    } else {
+      alert(error.message || String(error));
+    }
   } finally {
-    importScenarioButton.disabled = false;
-    importScenarioFileInput.value = '';
+    if (importCollectionButton) {
+      importCollectionButton.disabled = false;
+    }
+    if (importCollectionFileInput) {
+      importCollectionFileInput.value = '';
+    }
+    pendingImportCollectionPath = '';
   }
 }
 
@@ -3729,9 +3917,11 @@ function renderStepCurl(text, canCopy = false) {
   }
 }
 
-function withActiveSuite(payload) {
-  if (activeSuiteDocument) {
-    payload.suite = activeSuiteDocument;
+function withActiveCollection(payload) {
+  if (activeCollectionDocument) {
+    payload.collection = activeCollectionDocument;
+    // Legacy key for run/step APIs that still read `suite`.
+    payload.suite = activeCollectionDocument;
   }
   if (selectedScenarioName && !isWorkspacePath(selectedScenarioName)) {
     payload.scenario_file = `./examples/${selectedScenarioName}`;
@@ -3741,7 +3931,7 @@ function withActiveSuite(payload) {
 
 function stepCurlPayload(hydratePrior) {
   const target = getRunTarget();
-  return withActiveSuite({
+  return withActiveCollection({
     scenario: currentScenario,
     step_index: selectedStepIndex,
     base_url: requestBaseUrl(),
@@ -3822,7 +4012,7 @@ async function copyStepCurl() {
 }
 
 function sequenceTestPayload() {
-  return withActiveSuite({
+  return withActiveCollection({
     scenario: currentScenario,
     base_url: requestBaseUrl(),
     selected_environment: getSelectedEnvironmentName(),
@@ -3875,7 +4065,7 @@ async function testSelectedStep() {
   try {
     const result = await api('/api/test-step', {
       method: 'POST',
-      body: JSON.stringify(withActiveSuite({
+      body: JSON.stringify(withActiveCollection({
         scenario: currentScenario,
         step_index: selectedStepIndex,
         base_url: requestBaseUrl(),
@@ -3900,9 +4090,9 @@ function setRunButtonsDisabled(disabled) {
 }
 
 async function startRun() {
-  const runFile = activeSuitePath || selectedScenarioName || scenarioNameInput.value.trim();
+  const runFile = activeCollectionPath || selectedScenarioName || scenarioNameInput.value.trim();
   if (!runFile) {
-    alert('Open a suite first');
+    alert('Open a collection first');
     return;
   }
 
@@ -4135,14 +4325,14 @@ document.addEventListener('keydown', (event) => {
 });
 document.getElementById('save-scenario').addEventListener('click', saveScenario);
 document.getElementById('auth-toggle')?.addEventListener('click', toggleAuth);
-if (copySuiteButton) {
-  copySuiteButton.addEventListener('click', () => {
-    void copyOpenSuite();
+if (copyCollectionButton) {
+  copyCollectionButton.addEventListener('click', () => {
+    void copyOpenCollection();
   });
 }
-if (deleteSuiteButton) {
-  deleteSuiteButton.addEventListener('click', () => {
-    void deleteOpenSuite();
+if (deleteCollectionButton) {
+  deleteCollectionButton.addEventListener('click', () => {
+    void deleteOpenCollection();
   });
 }
 if (deleteScenarioButton) {
@@ -4150,16 +4340,32 @@ if (deleteScenarioButton) {
     void deleteOpenScenario();
   });
 }
-if (saveSuiteButton) {
-  saveSuiteButton.addEventListener('click', () => {
-    void saveSuite();
+if (saveCollectionButton) {
+  saveCollectionButton.addEventListener('click', () => {
+    void saveCollection();
   });
 }
-importScenarioButton.addEventListener('click', () => importScenarioFileInput.click());
-importScenarioFileInput.addEventListener('change', async () => {
-  const [file] = importScenarioFileInput.files || [];
-  await importScenarioFromFile(file);
-});
+if (importCollectionButton) {
+  importCollectionButton.addEventListener('click', () => {
+    startCollectionImport(activeCollectionPath || selectedScenarioName);
+  });
+}
+if (exportCollectionBrunoButton) {
+  exportCollectionBrunoButton.addEventListener('click', () => {
+    const collectionPath = activeCollectionPath || (isCollectionDocument(currentScenario) ? selectedScenarioName : '');
+    if (!collectionPath) {
+      alert('Open a collection before exporting.');
+      return;
+    }
+    void exportCollectionForBruno(collectionPath);
+  });
+}
+if (importCollectionFileInput) {
+  importCollectionFileInput.addEventListener('change', async () => {
+    const [file] = importCollectionFileInput.files || [];
+    await importCollectionFromFile(file, pendingImportCollectionPath || activeCollectionPath);
+  });
+}
 if (regressionRunButton) {
   regressionRunButton.addEventListener('click', () => startRun());
 }
@@ -4215,8 +4421,8 @@ scenarioEnvironmentSelect.addEventListener('change', () => {
     currentScenario = createEmptyScenario();
   }
   currentScenario.selected_environment = scenarioEnvironmentSelect.value;
-  if (activeSuiteDocument) {
-    activeSuiteDocument.selected_environment = scenarioEnvironmentSelect.value;
+  if (activeCollectionDocument) {
+    activeCollectionDocument.selected_environment = scenarioEnvironmentSelect.value;
   }
   lastHydratedCurlKey = '';
   lastStepContextVars = {};

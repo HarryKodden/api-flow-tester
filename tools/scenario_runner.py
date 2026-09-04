@@ -440,7 +440,7 @@ SKIP_EXPORTED_VARS = {"worker_id", "exec_error"}
 
 
 def exported_context_vars(vars_map: dict[str, Any] | None, names: Any) -> dict[str, Any]:
-    """Promote selected scenario vars into suite env for later members."""
+    """Promote selected scenario vars into collection env for later members."""
     source = vars_map if isinstance(vars_map, dict) else {}
     if names is True:
         keys = [str(key) for key in source if str(key) not in SKIP_EXPORTED_VARS]
@@ -1355,7 +1355,7 @@ def run_worker(
     capture_vars()
 
 
-def is_suite(scenario: dict[str, Any]) -> bool:
+def is_collection(scenario: dict[str, Any]) -> bool:
     files = scenario.get("scenarios")
     steps = scenario.get("steps") or []
     return isinstance(files, list) and len(files) > 0 and len(steps) == 0
@@ -1383,49 +1383,50 @@ def merge_defined(higher: dict[str, Any] | None, lower: dict[str, Any] | None) -
     return merged
 
 
-def apply_suite_defaults(child: dict[str, Any], suite: dict[str, Any] | None) -> dict[str, Any]:
-    """Suite environments/constants win when set; scenario values fill gaps."""
-    if not suite or not isinstance(child, dict):
+def apply_collection_defaults(child: dict[str, Any], collection: dict[str, Any] | None) -> dict[str, Any]:
+    """Collection environments/constants win when set; scenario values fill gaps."""
+    if not collection or not isinstance(child, dict):
         return child
     merged = dict(child)
-    suite_envs = suite.get("environments") if isinstance(suite.get("environments"), dict) else {}
+    collection_envs = collection.get("environments") if isinstance(collection.get("environments"), dict) else {}
     child_envs = child.get("environments") if isinstance(child.get("environments"), dict) else {}
     names: list[str] = []
-    for name in list(suite_envs) + list(child_envs):
+    for name in list(collection_envs) + list(child_envs):
         if name not in names:
             names.append(name)
     if names:
         merged_envs: dict[str, Any] = {}
         for name in names:
-            higher = suite_envs.get(name) if isinstance(suite_envs.get(name), dict) else {}
+            higher = collection_envs.get(name) if isinstance(collection_envs.get(name), dict) else {}
             lower = child_envs.get(name) if isinstance(child_envs.get(name), dict) else {}
             merged_envs[name] = merge_defined(higher, lower)
         merged["environments"] = merged_envs
-    suite_consts = suite.get("random_generators") if isinstance(suite.get("random_generators"), dict) else {}
+    collection_consts = collection.get("random_generators") if isinstance(collection.get("random_generators"), dict) else {}
     child_consts = child.get("random_generators") if isinstance(child.get("random_generators"), dict) else {}
-    if suite_consts or child_consts:
-        merged["random_generators"] = merge_defined(suite_consts, child_consts)
-    if _is_set(suite.get("selected_environment")):
-        merged["selected_environment"] = suite.get("selected_environment")
-    if _is_set(suite.get("base_url")):
-        merged["base_url"] = suite.get("base_url")
+    if collection_consts or child_consts:
+        merged["random_generators"] = merge_defined(collection_consts, child_consts)
+    if _is_set(collection.get("selected_environment")):
+        merged["selected_environment"] = collection.get("selected_environment")
+    if _is_set(collection.get("base_url")):
+        merged["base_url"] = collection.get("base_url")
     return merged
 
 
-def discover_parent_suite(scenario_path: Path, scenario: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    """Find the most specific suite in the same folder that lists this scenario."""
+def discover_parent_collection(scenario_path: Path, scenario: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Find the most specific collection in the same folder that lists this scenario."""
     folder = scenario_path.parent
     filename = scenario_path.name
     wanted_env = ""
     if isinstance(scenario, dict):
         wanted_env = str(scenario.get("selected_environment") or "").strip()
     candidates: list[tuple[tuple[int, int, str], dict[str, Any]]] = []
-    for path in sorted(folder.glob("suite*.json")):
+    paths = sorted({*folder.glob("collection*.json"), *folder.glob("suite*.json")})
+    for path in paths:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if not isinstance(data, dict) or not is_suite(data):
+        if not isinstance(data, dict) or not is_collection(data):
             continue
         members = data.get("scenarios") or []
         if filename not in members:
@@ -1439,7 +1440,7 @@ def discover_parent_suite(scenario_path: Path, scenario: dict[str, Any] | None =
             if isinstance(env_block, dict)
             else 0
         )
-        # Prefer suites that already supply credentials over provision-only suites.
+        # Prefer collections that already supply credentials over provision-only collections.
         candidates.append(((-defined_env, env_rank, len(members), path.name), data))
     if not candidates:
         return None
@@ -1449,21 +1450,21 @@ def discover_parent_suite(scenario_path: Path, scenario: dict[str, Any] | None =
     return data
 
 
-def load_suite_members(suite_path: Path, suite: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+def load_collection_members(collection_path: Path, collection: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     members: list[tuple[str, dict[str, Any]]] = []
-    for name in suite.get("scenarios") or []:
+    for name in collection.get("scenarios") or []:
         if not isinstance(name, str) or not name.strip():
             continue
-        child_path = (suite_path.parent / name).resolve()
+        child_path = (collection_path.parent / name).resolve()
         if not child_path.is_file():
-            raise SystemExit(f"Suite member not found: {name}")
+            raise SystemExit(f"Collection member not found: {name}")
         with child_path.open("r", encoding="utf-8") as fh:
             child = json.load(fh)
         if not isinstance(child, dict):
-            raise SystemExit(f"Suite member is not a JSON object: {name}")
+            raise SystemExit(f"Collection member is not a JSON object: {name}")
         members.append((name, child))
     if not members:
-        raise SystemExit("Suite has no scenario files")
+        raise SystemExit("Collection has no scenario files")
     return members
 
 
@@ -1589,13 +1590,13 @@ def main() -> int:
             raise SystemExit("--extra-env-file must contain a JSON object")
         extra_env.update(loaded)
 
-    suite_mode = is_suite(scenario)
-    parent_suite = None if suite_mode else discover_parent_suite(scenario_path, scenario)
-    members = load_suite_members(scenario_path, scenario) if suite_mode else [(scenario_path.name, scenario)]
-    iterations = args.iterations if args.iterations > 0 or not suite_mode else 1
-    users = 1 if suite_mode else args.users
+    collection_mode = is_collection(scenario)
+    parent_collection = None if collection_mode else discover_parent_collection(scenario_path, scenario)
+    members = load_collection_members(scenario_path, scenario) if collection_mode else [(scenario_path.name, scenario)]
+    iterations = args.iterations if args.iterations > 0 or not collection_mode else 1
+    users = 1 if collection_mode else args.users
     duration = args.duration if args.duration > 0 else 30
-    if suite_mode and args.duration <= 30:
+    if collection_mode and args.duration <= 30:
         duration = 120
     started = time.time()
     child_results: list[dict[str, Any]] = []
@@ -1624,8 +1625,8 @@ def main() -> int:
             )
             print(f"FAIL {name}: skipped ({skip_remaining})")
             continue
-        parent = scenario if suite_mode else parent_suite
-        prepared = apply_suite_defaults(child, parent) if parent else child
+        parent = scenario if collection_mode else parent_collection
+        prepared = apply_collection_defaults(child, parent) if parent else child
         result = execute_scenario(
             prepared,
             base_url_override=args.base_url,
@@ -1633,7 +1634,7 @@ def main() -> int:
             users=users,
             duration=duration,
             iterations=iterations,
-            fail_fast=True if suite_mode else args.fail_fast,
+            fail_fast=True if collection_mode else args.fail_fast,
             extra_env=extra_env or None,
         )
         result["file"] = name
@@ -1646,19 +1647,19 @@ def main() -> int:
         failed_steps = [step for step in result.get("steps", []) if step.get("failure")]
         extra = f"  {failed_steps[0].get('last_error')}" if failed_steps and failed_steps[0].get("last_error") else ""
         print(f"{status} {name}: {totals.get('success', 0)}/{totals.get('requests', 0)}{extra}")
-        if suite_mode and child.get("export_env") and status == "FAIL":
+        if collection_mode and child.get("export_env") and status == "FAIL":
             skip_remaining = f"{name} failed"
 
     elapsed = max(time.time() - started, 0.001)
-    if suite_mode:
+    if collection_mode:
         total_count = sum(item["totals"]["requests"] for item in child_results)
         total_success = sum(item["totals"]["success"] for item in child_results)
         total_failure = sum(item["totals"]["failure"] for item in child_results)
         total_mismatch = sum(item["totals"]["expected_mismatch"] for item in child_results)
         passed = sum(1 for item in child_results if item["totals"]["failure"] == 0 and item["totals"]["expected_mismatch"] == 0 and item["totals"]["success"] > 0)
         output = {
-            "kind": "suite",
-            "suite": scenario_path.name,
+            "kind": "collection",
+            "collection": scenario_path.name,
             "base_url": args.base_url or resolve_base_url(scenario, args.environment),
             "environment": args.environment,
             "users": users,

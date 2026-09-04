@@ -29,11 +29,11 @@ class User(Base):
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
-    suites: Mapped[list[Suite]] = relationship(back_populates="owner")
+    collections: Mapped[list[Collection]] = relationship(back_populates="owner")
 
 
-class Suite(Base):
-    __tablename__ = "suites"
+class Collection(Base):
+    __tablename__ = "collections"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
     owner_id: Mapped[str] = mapped_column(
@@ -48,53 +48,53 @@ class Suite(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
-    owner: Mapped[User] = relationship(back_populates="suites")
+    owner: Mapped[User] = relationship(back_populates="collections")
     scenarios: Mapped[list[Scenario]] = relationship(
-        back_populates="suite",
+        back_populates="collection",
         cascade="all, delete-orphan",
         order_by="Scenario.created_at",
     )
-    env_values: Mapped[list[SuiteEnvValue]] = relationship(
-        back_populates="suite",
+    env_values: Mapped[list[CollectionEnvValue]] = relationship(
+        back_populates="collection",
         cascade="all, delete-orphan",
     )
 
 
 class Scenario(Base):
     __tablename__ = "scenarios"
-    __table_args__ = (UniqueConstraint("suite_id", "name", name="uq_scenarios_suite_name"),)
+    __table_args__ = (UniqueConstraint("collection_id", "name", name="uq_scenarios_collection_name"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
     owner_id: Mapped[str] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    suite_id: Mapped[str] = mapped_column(
-        ForeignKey("suites.id", ondelete="CASCADE"), nullable=False, index=True
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("collections.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     document: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
-    suite: Mapped[Suite] = relationship(back_populates="scenarios")
+    collection: Mapped[Collection] = relationship(back_populates="scenarios")
 
 
-class SuiteEnvValue(Base):
-    __tablename__ = "suite_env_values"
-    __table_args__ = (UniqueConstraint("suite_id", "environment_name", name="uq_suite_env"),)
+class CollectionEnvValue(Base):
+    __tablename__ = "collection_env_values"
+    __table_args__ = (UniqueConstraint("collection_id", "environment_name", name="uq_collection_env"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
     owner_id: Mapped[str] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    suite_id: Mapped[str] = mapped_column(
-        ForeignKey("suites.id", ondelete="CASCADE"), nullable=False, index=True
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("collections.id", ondelete="CASCADE"), nullable=False, index=True
     )
     environment_name: Mapped[str] = mapped_column(String(255), nullable=False)
     values: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
-    suite: Mapped[Suite] = relationship(back_populates="env_values")
+    collection: Mapped[Collection] = relationship(back_populates="env_values")
 
 
 class WorkspaceFolder(Base):
