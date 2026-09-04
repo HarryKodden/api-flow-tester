@@ -4,9 +4,11 @@ from tools.scenario_runner import (
     apply_env_overrides,
     apply_suite_defaults,
     expand_environment_values,
+    expand_placeholder_defaults,
     finalize_environment_values,
     is_suite,
     missing_environment_dependencies,
+    parse_placeholder_token,
     resolve_base_url,
     resolve_environment_values,
 )
@@ -109,6 +111,52 @@ def test_apply_suite_defaults_merges_environments_without_forcing_selection():
     assert merged["environments"]["dev"]["server"] == "https://suite.example.org"
     assert merged["environments"]["dev"]["token"] == "suite"
     assert merged.get("selected_environment", "") == ""
+
+
+def test_placeholder_default_inside_environment_values():
+    expanded = expand_environment_values(
+        {
+            "server": "https://jsonplaceholder.typicode.com",
+            "posts_url": "{{ server }}/posts",
+            "user_id": "{{ uid : 0 }}",
+        }
+    )
+    assert expanded["posts_url"] == "https://jsonplaceholder.typicode.com/posts"
+    assert expanded["user_id"] == "0"
+    overridden = expand_environment_values(
+        {
+            "uid": "7",
+            "user_id": "{{ uid : 0 }}",
+        }
+    )
+    assert overridden["user_id"] == "7"
+    finalized = finalize_environment_values(
+        {
+            "server": "https://jsonplaceholder.typicode.com",
+            "user_id": "{{ uid : 0 }}",
+        }
+    )
+    assert finalized["user_id"] == "0"
+    assert missing_environment_dependencies(finalized, [{"path": "{{ env.user_id }}"}]) == []
+
+
+def test_placeholder_default_is_used_when_unset():
+    assert parse_placeholder_token('server : "https://api.example.org"') == ("server", "https://api.example.org")
+    assert parse_placeholder_token("token : 'abc'") == ("token", "abc")
+    assert parse_placeholder_token("port : 8080") == ("port", "8080")
+    assert parse_placeholder_token("env.server") == ("env.server", None)
+    steps = [{"method": "GET", "path": '{{ server : "https://api.example.org" }}/clients'}]
+    assert missing_environment_dependencies({}, steps) == []
+    assert expand_placeholder_defaults(steps[0]["path"]) == "https://api.example.org/clients"
+    expanded = expand_environment_values({"token_url": '{{ server : "https://api.example.org" }}/token'})
+    assert expanded["token_url"] == "https://api.example.org/token"
+
+
+def test_placeholder_default_is_overridden_when_set():
+    steps = [{"method": "GET", "path": '{{ token : "fallback" }}'}]
+    assert missing_environment_dependencies({"token": "from-env"}, steps) == []
+    mixed = [{"path": "{{ token }}"}, {"path": '{{ token : "fallback" }}'}]
+    assert "token" in missing_environment_dependencies({}, mixed)
 
 
 def test_is_suite_and_base_url_from_steps():

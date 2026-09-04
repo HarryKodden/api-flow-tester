@@ -100,16 +100,17 @@
                 </div>
               </label>
             </div>
-            <div id="session-env-wrap" class="session-env-wrap hidden">
-              <div class="lane-head">
-                <h4>Missing environment values</h4>
-                <button id="clear-session-env" type="button" class="ghost">Clear</button>
-              </div>
-              <p id="session-env-help" class="muted">Empty, removed from the environment, still a template, or localhost. Enter a value. Library values stay in this browser session; workspace values are saved privately for this suite.</p>
-              <div id="session-env-fields" class="env-dialog-fields"></div>
-              <p id="session-env-empty" class="muted">No environment values are required for the current steps.</p>
-              <p id="session-env-run-hint" class="muted run-mode-hint">Run Tests stays disabled until every field has a value.</p>
+          </section>
+
+          <section id="session-env-wrap" class="panel card session-env-wrap hidden">
+            <div class="lane-head">
+              <h4>Environment values</h4>
+              <button id="clear-session-env" type="button" class="ghost">Clear</button>
             </div>
+            <p id="session-env-help" class="muted">Required values and variables with a default from the open scenario or suite. The field shows the current value; overwrite it to change this run. Library values stay in this browser session; workspace values are saved privately for this suite.</p>
+            <div id="session-env-fields" class="env-dialog-fields"></div>
+            <p id="session-env-empty" class="muted">No environment values on the current steps.</p>
+            <p id="session-env-run-hint" class="muted run-mode-hint">Run Tests stays disabled until every required field has a value.</p>
           </section>
 
           <section id="run-section" class="panel card controls">

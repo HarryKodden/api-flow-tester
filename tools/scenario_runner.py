@@ -37,6 +37,7 @@ from tools.oauth_helpers import (
 )
 
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^}]+)\s*\}\}")
+PLACEHOLDER_NAME_RE = re.compile(r"^(?P<name>[A-Za-z_][\w.]*)(?:\s*:\s*(?P<default>.+))?$")
 CONNECTION_ENV_KEYS = {"server", "base_url", "baseUrl", "url", "mock_provider"}
 FORBIDDEN_API_HOSTS = frozenset({
     "localhost",
@@ -171,8 +172,33 @@ def build_random_value(config: dict[str, Any]) -> Any:
     return ""
 
 
-def resolve_token(token: str, context: dict[str, Any], random_generators: dict[str, Any]) -> Any:
-    token = token.strip()
+def unquote_placeholder_default(value: str) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        return text[1:-1]
+    return text
+
+
+def parse_placeholder_token(raw: str) -> tuple[str, str | None]:
+    """Split `name` or `name : "default"` from a `{{ ... }}` body."""
+    text = str(raw or "").strip()
+    if not text:
+        return "", None
+    match = PLACEHOLDER_NAME_RE.match(text)
+    if not match:
+        return text, None
+    default_raw = match.group("default")
+    default = None if default_raw is None else unquote_placeholder_default(default_raw)
+    return match.group("name"), default
+
+
+def _is_blank_resolved(value: Any) -> bool:
+    if value is None:
+        return True
+    return isinstance(value, str) and value.strip() == ""
+
+
+def resolve_named_token(token: str, context: dict[str, Any], random_generators: dict[str, Any]) -> Any:
     if token.startswith("vars."):
         return path_get(context.get("vars", {}), token[5:], "")
     if token.startswith("env."):
@@ -191,6 +217,24 @@ def resolve_token(token: str, context: dict[str, Any], random_generators: dict[s
     if token in context.get("env", {}):
         return context["env"][token]
     return ""
+
+
+def resolve_token(token: str, context: dict[str, Any], random_generators: dict[str, Any]) -> Any:
+    name, default = parse_placeholder_token(token)
+    resolved = resolve_named_token(name, context, random_generators)
+    if _is_blank_resolved(resolved) and default is not None:
+        return default
+    return resolved
+
+
+def expand_placeholder_defaults(value: str) -> str:
+    """Replace `{{ name : "default" }}` with the default for inspection only."""
+
+    def repl(match: re.Match[str]) -> str:
+        _name, default = parse_placeholder_token(match.group(1))
+        return default if default is not None else match.group(0)
+
+    return PLACEHOLDER_RE.sub(repl, str(value or ""))
 
 
 def resolve_base_url(scenario: dict[str, Any], selected_environment: str | None) -> str:
@@ -217,14 +261,19 @@ def resolve_environment_values(scenario: dict[str, Any], selected_environment: s
 
 
 def _environment_ref_path(token: str) -> str | None:
-    token = token.strip()
-    if token.startswith(("vars.", "random.", "meta.")):
+    name, _default = parse_placeholder_token(token)
+    if name.startswith(("vars.", "random.", "meta.")):
         return None
-    if token.startswith("env."):
-        return token[4:]
-    if token.startswith("_."):
-        return token[2:]
-    return token
+    if name.startswith("env."):
+        return name[4:]
+    if name.startswith("_."):
+        return name[2:]
+    return name or None
+
+
+def _placeholder_default(token: str) -> str | None:
+    _name, default = parse_placeholder_token(token)
+    return default
 
 
 def _value_has_env_placeholders(value: str) -> bool:
@@ -250,14 +299,15 @@ def expand_environment_values(
     def expand_str(value: str) -> str:
         def repl(match: re.Match[str]) -> str:
             path = _environment_ref_path(match.group(1))
+            default = _placeholder_default(match.group(1))
             if path is None:
                 return match.group(0)
             resolved = lookup(path)
-            if resolved is None or isinstance(resolved, (dict, list)):
-                return match.group(0)
-            text = "" if resolved is None else str(resolved)
+            if not _is_concrete_env_value(resolved):
+                return default if default is not None else match.group(0)
+            text = str(resolved)
             if _value_has_env_placeholders(text):
-                return match.group(0)
+                return default if default is not None else match.group(0)
             return text
 
         return PLACEHOLDER_RE.sub(repl, value)
@@ -293,15 +343,16 @@ def finalize_environment_values(
     """Expand intra-environment placeholders and encoded companion keys."""
     prepared = dict(values or {})
     prepared = expand_environment_values(prepared, keys=CONNECTION_ENV_KEYS)
-    resolved = (base_url or "").strip()
-    if resolved and is_forbidden_api_target(resolved):
-        resolved = ""
+    resolved = ""
+    for key in ("server", "base_url", "baseUrl", "url"):
+        value = prepared.get(key)
+        if _is_concrete_env_value(value) and not is_forbidden_api_target(value):
+            resolved = str(value).strip()
+            break
     if not resolved:
-        for key in ("server", "base_url", "baseUrl", "url"):
-            value = prepared.get(key)
-            if isinstance(value, str) and value.strip():
-                resolved = value.strip()
-                break
+        resolved = (base_url or "").strip()
+        if resolved and is_forbidden_api_target(resolved):
+            resolved = ""
     if resolved:
         prepared["server"] = resolved
         prepared.setdefault("base_url", resolved)
@@ -323,19 +374,31 @@ def apply_encoded_companions(values: dict[str, Any]) -> dict[str, Any]:
     return applied
 
 
-def collect_environment_refs(value: Any, found: set[str] | None = None) -> set[str]:
-    refs = found if found is not None else set()
+def collect_environment_ref_specs(value: Any, found: dict[str, str | None] | None = None) -> dict[str, str | None]:
+    """Map env paths to a default, or None when any use has no default."""
+    specs = found if found is not None else {}
     if isinstance(value, str):
         for raw in PLACEHOLDER_RE.findall(value):
             path = _environment_ref_path(raw)
-            if path:
-                refs.add(path)
+            if not path:
+                continue
+            default = _placeholder_default(raw)
+            if path not in specs:
+                specs[path] = default
+            elif default is None:
+                specs[path] = None
     elif isinstance(value, dict):
         for item in value.values():
-            collect_environment_refs(item, refs)
+            collect_environment_ref_specs(item, specs)
     elif isinstance(value, list):
         for item in value:
-            collect_environment_refs(item, refs)
+            collect_environment_ref_specs(item, specs)
+    return specs
+
+
+def collect_environment_refs(value: Any, found: set[str] | None = None) -> set[str]:
+    refs = found if found is not None else set()
+    refs.update(path for path, default in collect_environment_ref_specs(value).items() if default is None)
     return refs
 
 
@@ -406,16 +469,18 @@ def render_expectation_step(
 
 
 def missing_environment_dependencies(*sources: Any) -> list[str]:
-    refs: set[str] = set()
+    specs: dict[str, str | None] = {}
     values = sources[0] if sources and isinstance(sources[0], dict) else {}
-    for source in sources:
-        collect_environment_refs(source, refs)
+    for source in sources[1:] if sources and isinstance(sources[0], dict) else sources:
+        collect_environment_ref_specs(source, specs)
     missing: list[str] = []
     has_host = any(
         _is_concrete_env_value(values.get(key)) and not is_forbidden_api_target(values.get(key))
         for key in CONNECTION_ENV_KEYS
     )
-    for path in sorted(refs):
+    for path in sorted(specs):
+        if specs.get(path) is not None:
+            continue
         resolved = path_get(values, path, None)
         if resolved is None and path in values:
             resolved = values[path]
@@ -797,11 +862,14 @@ def missing_var_tokens(step: dict[str, Any], context: dict[str, Any]) -> list[st
     missing: list[str] = []
     vars_map = context.get("vars") if isinstance(context.get("vars"), dict) else {}
     for token in tokens:
-        if not token.startswith("vars."):
+        name, default = parse_placeholder_token(token)
+        if not name.startswith("vars."):
             continue
-        value = path_get(vars_map, token[5:], None)
+        value = path_get(vars_map, name[5:], None)
         if value is None or value == "":
-            missing.append(token)
+            if default is not None:
+                continue
+            missing.append(name)
     return missing
 
 

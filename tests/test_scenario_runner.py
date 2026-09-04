@@ -10,6 +10,7 @@ from tools.scenario_runner import (
     format_curl_command,
     is_forbidden_api_host,
     is_forbidden_api_target,
+    missing_var_tokens,
     path_get,
     preview_step_request,
     render_template,
@@ -61,6 +62,31 @@ def test_render_template_env_vars_and_meta():
     assert render_template("{{ token }}", context, {}) == "abc"
     now = render_template("{{ meta.now }}", context, {})
     assert isinstance(now, str) and "T" in now
+
+
+def test_render_template_uses_placeholder_defaults():
+    empty = {"vars": {}, "env": {}}
+    assert render_template('{{ server : "https://api.example.org" }}', empty, {}) == "https://api.example.org"
+    assert render_template("{{ token : 'none' }}", empty, {}) == "none"
+    assert render_template("{{ port : 8080 }}", empty, {}) == "8080"
+    assert render_template('Prefix {{ token : "x" }}', empty, {}) == "Prefix x"
+    overridden = {"vars": {}, "env": {"server": "https://other.example.org", "token": ""}}
+    assert render_template('{{ server : "https://api.example.org" }}', overridden, {}) == "https://other.example.org"
+    assert render_template('{{ token : "fallback" }}', overridden, {}) == "fallback"
+    assert render_template('{{ vars.user_id : "anon" }}', empty, {}) == "anon"
+    assert render_template('{{ vars.user_id : "anon" }}', {"vars": {"user_id": 7}, "env": {}}, {}) == 7
+    assert missing_var_tokens({"path": '{{ vars.user_id : "anon" }}'}, empty) == []
+    assert missing_var_tokens({"path": "{{ vars.user_id }}"}, empty) == ["vars.user_id"]
+
+
+def test_build_http_request_uses_defaulted_server():
+    request = build_http_request(
+        {"method": "GET", "path": '{{ server : "https://api.example.org" }}/clients'},
+        "",
+        {"env": {}, "vars": {}},
+        {},
+    )
+    assert request["url"] == "https://api.example.org/clients"
 
 
 def test_build_http_request_keeps_absolute_url():

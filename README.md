@@ -246,9 +246,12 @@ Use Insomnia-style placeholders in your step URLs, headers, and bodies:
 | `{{ _.token }}` | `token` key in the selected environment |
 | `{{ env.token }}` | `token` key in the selected environment |
 | `{{ token }}` | `token` key in the selected environment |
+| `{{ server : "https://api.example.org" }}` | `server` from the environment, or the quoted default if unset |
 | `{{ vars.some_id }}` | saved response field from a previous step |
 | `{{ random.gen_name }}` | configured random generator |
 | `{{ meta.now }}` | current UTC timestamp |
+
+A colon after the name sets a default: `{{ name : "value" }}` or `{{ name : 0 }}`. That works in step fields and inside environment values, for example `"user_id": "{{ uid : 0 }}"`. Fill `uid` in **Environment values** to override it; leave it alone to keep `0`.
 
 Environment values can also reference other keys in the same environment. Set a host once and reuse it:
 

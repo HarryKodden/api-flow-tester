@@ -81,6 +81,9 @@ let selectedFolderPath = '';
 let activeSuitePath = '';
 let activeSuiteMembers = [];
 let activeSuiteDocument = null;
+let suiteMemberDocs = new Map();
+let suiteMemberDocsSuite = '';
+let suiteMemberDocsLoading = null;
 const LAST_OPEN_STORAGE_KEY = 'lti.last.open';
 let scenarioTree = {type: 'dir', name: 'examples', path: '', children: []};
 let expandedFolders = new Set();
@@ -743,18 +746,42 @@ function isForbiddenApiTarget(value) {
   return isForbiddenApiHost(hostnameFromTarget(text));
 }
 
+function unquotePlaceholderDefault(value) {
+  const text = String(value || '').trim();
+  if (text.length >= 2 && text[0] === text[text.length - 1] && (text[0] === '"' || text[0] === "'")) {
+    return text.slice(1, -1);
+  }
+  return text;
+}
+
+function parsePlaceholderToken(raw) {
+  const text = String(raw || '').trim();
+  const match = text.match(/^([A-Za-z_][\w.]*)(?:\s*:\s*([\s\S]+))?$/);
+  if (!match) {
+    return {name: text, defaultValue: null};
+  }
+  return {
+    name: match[1],
+    defaultValue: match[2] == null ? null : unquotePlaceholderDefault(match[2]),
+  };
+}
+
 function envPlaceholderPath(token) {
-  const trimmed = String(token || '').trim();
-  if (trimmed.startsWith('vars.') || trimmed.startsWith('random.') || trimmed.startsWith('meta.')) {
+  const {name} = parsePlaceholderToken(token);
+  if (!name || name.startsWith('vars.') || name.startsWith('random.') || name.startsWith('meta.')) {
     return null;
   }
-  if (trimmed.startsWith('env.')) {
-    return trimmed.slice(4);
+  if (name.startsWith('env.')) {
+    return name.slice(4);
   }
-  if (trimmed.startsWith('_.')) {
-    return trimmed.slice(2);
+  if (name.startsWith('_.')) {
+    return name.slice(2);
   }
-  return trimmed;
+  return name;
+}
+
+function placeholderDefault(token) {
+  return parsePlaceholderToken(token).defaultValue;
 }
 
 function valueHasEnvPlaceholders(value) {
@@ -773,6 +800,7 @@ function expandEnvironmentValues(env, keys) {
 
   const expandString = (value) => value.replace(/\{\{\s*([^}]+)\s*\}\}/g, (match, rawToken) => {
     const path = envPlaceholderPath(rawToken);
+    const defaultValue = placeholderDefault(rawToken);
     if (path == null) {
       return match;
     }
@@ -781,11 +809,11 @@ function expandEnvironmentValues(env, keys) {
       resolved = current[path];
     }
     if (resolved == null || resolved === '' || typeof resolved === 'object') {
-      return match;
+      return defaultValue != null ? defaultValue : match;
     }
     const text = String(resolved);
     if (valueHasEnvPlaceholders(text)) {
-      return match;
+      return defaultValue != null ? defaultValue : match;
     }
     return text;
   });
@@ -841,23 +869,44 @@ function isConcreteEnvValue(value) {
   return true;
 }
 
-function collectEnvRefs(value, found = new Set()) {
+function collectEnvRefSpecs(value, found = new Map()) {
   if (typeof value === 'string') {
     const pattern = /\{\{\s*([^}]+)\s*\}\}/g;
     let match = pattern.exec(value);
     while (match) {
       const path = envPlaceholderPath(match[1]);
       if (path) {
-        found.add(path);
+        const defaultValue = placeholderDefault(match[1]);
+        if (!found.has(path)) {
+          found.set(path, defaultValue);
+        } else if (defaultValue == null) {
+          found.set(path, null);
+        }
       }
       match = pattern.exec(value);
     }
   } else if (Array.isArray(value)) {
-    value.forEach((item) => collectEnvRefs(item, found));
+    value.forEach((item) => collectEnvRefSpecs(item, found));
   } else if (value && typeof value === 'object') {
-    Object.values(value).forEach((item) => collectEnvRefs(item, found));
+    Object.values(value).forEach((item) => collectEnvRefSpecs(item, found));
   }
   return found;
+}
+
+function collectEnvRefs(value, found = new Set()) {
+  collectEnvRefSpecs(value).forEach((defaultValue, path) => {
+    if (defaultValue == null) {
+      found.add(path);
+    }
+  });
+  return found;
+}
+
+function expandPlaceholderDefaults(value) {
+  return String(value || '').replace(/\{\{\s*([^}]+)\s*\}\}/g, (match, rawToken) => {
+    const defaultValue = placeholderDefault(rawToken);
+    return defaultValue != null ? defaultValue : match;
+  });
 }
 
 function getRawMergedEnvironment() {
@@ -1110,12 +1159,92 @@ function unsetEnvironmentKeys(applySession) {
   }).sort();
 }
 
+function activeSuiteFilePath() {
+  if (activeSuitePath) {
+    return activeSuitePath;
+  }
+  if (isSuiteScenario(currentScenario) && selectedScenarioName) {
+    return selectedScenarioName;
+  }
+  return '';
+}
+
+function suiteMemberScenarioPaths() {
+  const suitePath = activeSuiteFilePath();
+  if (!suitePath) {
+    return [];
+  }
+  const members = isSuiteScenario(currentScenario)
+    ? (Array.isArray(currentScenario.scenarios) ? currentScenario.scenarios : [])
+    : activeSuiteMembers.slice();
+  const folder = parentFolderPath(suitePath);
+  return members
+    .map((name) => joinPath(folder, String(name)))
+    .filter(Boolean);
+}
+
+function syncCurrentScenarioIntoMemberDocs() {
+  if (!selectedScenarioName || !currentScenario || isSuiteScenario(currentScenario)) {
+    return;
+  }
+  suiteMemberDocs.set(selectedScenarioName, currentScenario);
+}
+
+function envScanSteps() {
+  syncCurrentScenarioIntoMemberDocs();
+  const steps = [];
+  if (currentScenario && !isSuiteScenario(currentScenario) && Array.isArray(currentScenario.steps)) {
+    steps.push(...currentScenario.steps);
+  }
+  suiteMemberDocs.forEach((doc, path) => {
+    if (path === selectedScenarioName && currentScenario && !isSuiteScenario(currentScenario)) {
+      return;
+    }
+    if (doc && Array.isArray(doc.steps)) {
+      steps.push(...doc.steps);
+    }
+  });
+  return steps;
+}
+
+async function ensureSuiteMemberDocs() {
+  const suitePath = activeSuiteFilePath();
+  const memberPaths = suiteMemberScenarioPaths();
+  if (!suitePath || memberPaths.length === 0) {
+    if (!suitePath) {
+      suiteMemberDocs.clear();
+      suiteMemberDocsSuite = '';
+    }
+    syncCurrentScenarioIntoMemberDocs();
+    return false;
+  }
+  if (suiteMemberDocsSuite !== suitePath) {
+    suiteMemberDocs.clear();
+    suiteMemberDocsSuite = suitePath;
+  }
+  syncCurrentScenarioIntoMemberDocs();
+  const missing = memberPaths.filter((path) => !suiteMemberDocs.has(path));
+  if (missing.length === 0) {
+    return false;
+  }
+  await Promise.all(missing.map(async (path) => {
+    try {
+      const document = await api(scenarioFileUrl(path));
+      suiteMemberDocs.set(path, normalizeScenario(document));
+    } catch {
+      // Member may be missing; skip for env scanning.
+    }
+  }));
+  return true;
+}
+
 function missingEnvDependencies(applySession) {
   let env = getRawMergedEnvironment();
   if (applySession) {
     env = applyEncodedCompanions(expandEnvironmentValues(applySessionEnvOverrides(env)));
   }
-  const refs = collectEnvRefs(currentScenario?.steps || []);
+  const refs = collectEnvRefs(envScanSteps());
+  collectEnvRefs(getRawMergedEnvironment(), refs);
   const present = applySession ? isConcreteEnvValue : isAssignedEnvValue;
   return [...refs].filter((path) => {
     let resolved = lookupEnvPath(env, path);
@@ -1135,18 +1264,18 @@ function isNonHttpStep(step) {
 }
 
 function stepsNeedSharedBaseUrl(steps) {
-  const list = Array.isArray(steps) ? steps : (currentScenario?.steps || []);
+  const list = Array.isArray(steps) ? steps : envScanSteps();
   return list.some((step) => {
     if (isNonHttpStep(step)) {
       return false;
     }
-    const path = String(step?.path || step?.url || '').trim();
+    const path = expandPlaceholderDefaults(String(step?.path || step?.url || '').trim());
     return !isAbsoluteHttpUrl(path);
   });
 }
 
 function connectionKeysNeedingValues(env) {
-  const refs = collectEnvRefs(currentScenario?.steps || []);
+  const refs = collectEnvRefs(envScanSteps());
   const scenarioBase = (currentScenario?.base_url || '').trim();
   const needsSharedHost = stepsNeedSharedBaseUrl();
   return [...CONNECTION_ENV_KEYS].filter((key) => {
@@ -1177,10 +1306,83 @@ function loopbackConnectionKeys(applySession) {
   return connectionKeysNeedingValues(env);
 }
 
+function envScanSources() {
+  const sources = [envScanSteps()];
+  const env = getRawMergedEnvironment();
+  if (env && typeof env === 'object') {
+    sources.push(env);
+  }
+  return sources;
+}
+
+function collectAllEnvRefSpecs() {
+  const found = new Map();
+  envScanSources().forEach((source) => collectEnvRefSpecs(source, found));
+  return found;
+}
+
+function stepEnvDefaults() {
+  return collectAllEnvRefSpecs();
+}
+
+function defaultedEnvironmentNames() {
+  return [...collectAllEnvRefSpecs().entries()]
+    .filter(([, defaultValue]) => defaultValue != null)
+    .map(([path]) => path)
+    .sort();
+}
+
+function fileEnvValue(name) {
+  const fileValue = getRawMergedEnvironment()[name] ?? (name === 'base_url' ? currentScenario?.base_url : undefined);
+  if (fileValue == null) {
+    return '';
+  }
+  if (typeof fileValue === 'string') {
+    const text = fileValue.trim();
+    if (!text || valueHasEnvPlaceholders(text)) {
+      return '';
+    }
+    return text;
+  }
+  if (typeof fileValue === 'object') {
+    return '';
+  }
+  return String(fileValue);
+}
+
+function hasTypedEnvValue(value) {
+  if (value == null) {
+    return false;
+  }
+  if (typeof value === 'string') {
+    return Boolean(value.trim());
+  }
+  return true;
+}
+
+function effectiveEnvFieldValue(name, defaults = collectAllEnvRefSpecs(), session = getSessionEnvOverrides()) {
+  if (hasTypedEnvValue(session[name])) {
+    return String(session[name]).trim();
+  }
+  const fromFile = fileEnvValue(name);
+  if (fromFile) {
+    return fromFile;
+  }
+  const defaultValue = defaults.get(name);
+  return defaultValue != null ? String(defaultValue) : '';
+}
+
 function requiredEnvironmentNames() {
   return [...new Set([
     ...missingEnvDependencies(false),
     ...loopbackConnectionKeys(false),
+  ])].sort();
+}
+
+function displayedEnvironmentNames() {
+  return [...new Set([
+    ...requiredEnvironmentNames(),
+    ...defaultedEnvironmentNames(),
   ])].sort();
 }
 
@@ -1212,15 +1414,24 @@ function renderRequiredEnvPanel() {
   if (!wrap || !fields) {
     return;
   }
-  if (!hasSuiteContext()) {
+  syncCurrentScenarioIntoMemberDocs();
+  const names = displayedEnvironmentNames();
+  const hasOpenWork = Boolean(currentScenario) || Boolean(activeSuitePath) || names.length > 0;
+  if (!hasOpenWork) {
     wrap.classList.add('hidden');
     fields.replaceChildren();
     lastRequiredEnvNames = '';
     return;
   }
-  const names = requiredEnvironmentNames();
   const unsatisfied = unsatisfiedEnvironmentNames();
+  const defaults = stepEnvDefaults();
   const session = getSessionEnvOverrides();
+  wrap.classList.toggle('hidden', names.length === 0 && unsatisfied.length === 0);
+  if (names.length === 0 && unsatisfied.length === 0) {
+    fields.replaceChildren();
+    lastRequiredEnvNames = '';
+    return;
+  }
   wrap.classList.remove('hidden');
   wrap.classList.toggle('is-unsatisfied', unsatisfied.length > 0);
   if (hint) {
@@ -1234,7 +1445,11 @@ function renderRequiredEnvPanel() {
     names.forEach((name) => {
       const input = fields.querySelector(`[data-env-name="${name.replace(/"/g, '')}"]`);
       if (input && document.activeElement !== input) {
-        input.value = session[name] || '';
+        input.value = effectiveEnvFieldValue(name, defaults, session);
+      }
+      const hintEl = input?.parentElement?.querySelector('.env-current-value');
+      if (hintEl) {
+        hintEl.textContent = envFieldSourceHint(name, defaults, session);
       }
     });
     return;
@@ -1247,12 +1462,14 @@ function renderRequiredEnvPanel() {
     const input = document.createElement('input');
     input.type = 'text';
     input.dataset.envName = name;
-    input.value = session[name] || '';
+    const currentValue = effectiveEnvFieldValue(name, defaults, session);
+    input.value = currentValue;
     input.autocomplete = 'off';
     input.spellcheck = false;
-    input.placeholder = CONNECTION_ENV_KEYS.has(name)
-      ? 'http://192.168.1.10:8080'
-      : `Value for ${name}`;
+    const defaultValue = defaults.get(name);
+    input.placeholder = defaultValue != null
+      ? defaultValue
+      : (CONNECTION_ENV_KEYS.has(name) ? 'http://192.168.1.10:8080' : `Value for ${name}`);
     input.addEventListener('input', () => {
       setSessionEnvOverride(name, input.value);
       updateRunAvailability();
@@ -1260,15 +1477,52 @@ function renderRequiredEnvPanel() {
       scheduleStepCurlPreview();
     });
     label.appendChild(input);
-    const fileValue = getRawMergedEnvironment()[name] ?? (name === 'base_url' ? currentScenario?.base_url : undefined);
-    if (typeof fileValue === 'string' && fileValue.trim() && !session[name]) {
+    const hintText = envFieldSourceHint(name, defaults, session);
+    if (hintText) {
       const current = document.createElement('span');
       current.className = 'muted env-current-value';
-      current.textContent = `Currently ${fileValue}`;
+      current.textContent = hintText;
       label.appendChild(current);
     }
     fields.appendChild(label);
   });
+}
+
+function envFieldSourceHint(name, defaults, session) {
+  if (String(session[name] || '').trim()) {
+    return 'Override — clear the field to revert.';
+  }
+  if (fileEnvValue(name)) {
+    return 'From the selected environment.';
+  }
+  if (defaults.get(name) != null) {
+    return 'Default — overwrite to change.';
+  }
+  return '';
+}
+
+async function refreshEnvPanelFromSuiteMembers() {
+  const before = displayedEnvironmentNames().join('\0');
+  const loaded = await ensureSuiteMemberDocs();
+  const after = displayedEnvironmentNames().join('\0');
+  if (loaded || before !== after) {
+    lastRequiredEnvNames = '';
+    renderRequiredEnvPanel();
+    const unsatisfied = unsatisfiedEnvironmentNames();
+    const target = getRunTarget();
+    const hostBlocked = Boolean(target.host) && isForbiddenApiHost(target.host);
+    const blocked = runInProgress || unsatisfied.length > 0 || hostBlocked;
+    if (regressionRunButton) {
+      regressionRunButton.disabled = blocked;
+      if (unsatisfied.length) {
+        regressionRunButton.title = `Set required values: ${unsatisfied.join(', ')}`;
+      } else if (hostBlocked) {
+        regressionRunButton.title = ROUTABLE_HOST_HELP;
+      } else {
+        regressionRunButton.title = 'Run Tests';
+      }
+    }
+  }
 }
 
 function updateRunAvailability() {
@@ -1287,13 +1541,15 @@ function updateRunAvailability() {
       regressionRunButton.title = 'Run Tests';
     }
   }
+  if (suiteMemberDocsLoading) {
+    return;
+  }
+  suiteMemberDocsLoading = refreshEnvPanelFromSuiteMembers().finally(() => {
+    suiteMemberDocsLoading = null;
+  });
 }
 
 function getSelectedEnvironmentValues() {
-  const selectedName = getSelectedEnvironmentName();
-  if (!selectedName) {
-    return {};
-  }
   let merged = applySessionEnvOverrides(getRawMergedEnvironment());
   merged = expandEnvironmentValues(merged, CONNECTION_ENV_KEYS);
   const resolvedHost = merged.server || merged.base_url || merged.baseUrl || merged.url
@@ -1351,21 +1607,21 @@ function expandEnvPlaceholders(value) {
   }
   const env = environmentValuesForDisplay();
   return value.replace(/\{\{\s*([^}]+)\s*\}\}/g, (match, rawToken) => {
-    const token = String(rawToken).trim();
-    let path = token;
-    if (token.startsWith('env.')) {
-      path = token.slice(4);
-    } else if (token.startsWith('_.')) {
-      path = token.slice(2);
-    } else if (token.startsWith('vars.') || token.startsWith('random.') || token.startsWith('meta.')) {
-      return match;
+    const {name, defaultValue} = parsePlaceholderToken(rawToken);
+    let path = name;
+    if (name.startsWith('env.')) {
+      path = name.slice(4);
+    } else if (name.startsWith('_.')) {
+      path = name.slice(2);
+    } else if (name.startsWith('vars.') || name.startsWith('random.') || name.startsWith('meta.')) {
+      return defaultValue != null ? defaultValue : match;
     }
     let resolved = lookupEnvPath(env, path);
-    if (resolved == null && Object.prototype.hasOwnProperty.call(env, token)) {
-      resolved = env[token];
+    if (resolved == null && Object.prototype.hasOwnProperty.call(env, name)) {
+      resolved = env[name];
     }
     if (resolved == null || resolved === '') {
-      return match;
+      return defaultValue != null ? defaultValue : match;
     }
     return String(resolved);
   });
@@ -2638,11 +2894,14 @@ function resetOpenDocuments() {
   activeSuitePath = '';
   activeSuiteMembers = [];
   activeSuiteDocument = null;
+  suiteMemberDocs.clear();
+  suiteMemberDocsSuite = '';
   currentScenario = null;
   selectedStepIndex = -1;
   lastStepContextVars = {};
   lastHydratedCurlKey = '';
   loadedWorkspaceEnvKey = '';
+  lastRequiredEnvNames = '';
 }
 
 async function deletePath(path) {

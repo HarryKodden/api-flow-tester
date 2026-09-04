@@ -32,6 +32,7 @@ from tools.scenario_runner import (
     discover_parent_suite,
     apply_env_overrides,
     expand_environment_values,
+    expand_placeholder_defaults,
     finalize_environment_values,
     missing_environment_dependencies,
     preview_step_request,
@@ -838,7 +839,7 @@ def _usable_base_url(value: Any) -> str:
 
 def _base_url_from_steps(steps: list[dict[str, Any]]) -> str:
     for step in steps:
-        raw = str(step.get("path") or step.get("url") or "").strip()
+        raw = expand_placeholder_defaults(str(step.get("path") or step.get("url") or "").strip())
         if raw.startswith("http://") or raw.startswith("https://"):
             parsed = urlparse(raw)
             if parsed.netloc:

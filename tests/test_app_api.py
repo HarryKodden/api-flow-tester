@@ -43,6 +43,45 @@ def test_parse_curl_endpoint(client):
     assert empty.status_code == 400
 
 
+def test_preview_step_uses_placeholder_default(client):
+    response = client.post(
+        "/api/preview-step",
+        json={
+            "scenario": {
+                "selected_environment": "",
+                "steps": [
+                    {
+                        "name": "list_clients",
+                        "method": "GET",
+                        "path": '{{ server : "https://api.example.org" }}/clients',
+                    }
+                ],
+            },
+            "step_index": 0,
+            "selected_environment": "",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["request"]["url"] == "https://api.example.org/clients"
+
+
+def test_preview_step_override_beats_placeholder_default(client):
+    response = client.post(
+        "/api/preview-step",
+        json={
+            "scenario": {
+                "selected_environment": "",
+                "steps": [{"method": "GET", "path": '{{ server : "https://api.example.org" }}/clients'}],
+            },
+            "step_index": 0,
+            "selected_environment": "",
+            "environment_overrides": {"server": "https://other.example.org"},
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["request"]["url"] == "https://other.example.org/clients"
+
+
 def test_preview_step_without_environment(client):
     response = client.post(
         "/api/preview-step",
