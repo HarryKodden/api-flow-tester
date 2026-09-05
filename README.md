@@ -30,7 +30,7 @@ The CLI entrypoint is `bin/run.sh`. RunWay is a regression tester, not a load te
 ## Quick Start
 
 ```bash
-cd api-flow-tester
+cd RunWay
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -49,7 +49,7 @@ CI runs these tests on every push and pull request, then builds the container im
 Start the web frontend:
 
 ```bash
-cd api-flow-tester
+cd RunWay
 source .venv/bin/activate
 uvicorn webapp.app:app --app-dir . --host 127.0.0.1 --port 9011
 ```
@@ -65,8 +65,8 @@ http://127.0.0.1:9011
 Each push to `main` builds `linux/amd64` and `linux/arm64` images and publishes them to GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/harrykodden/api-flow-tester:latest
-docker run --rm -p 9011:8080 ghcr.io/harrykodden/api-flow-tester:latest
+docker pull ghcr.io/harrykodden/runway:latest
+docker run --rm -p 9011:8080 ghcr.io/harrykodden/runway:latest
 ```
 
 Then open `http://127.0.0.1:9011`.

@@ -81,7 +81,7 @@ jobs:
           context: .
           load: true
           platforms: linux/amd64
-          tags: api-flow-tester:ci
+          tags: runway:ci
           build-args: |
             RELEASE=${{ steps.release.outputs.tag }}
           cache-from: type=gha
@@ -89,17 +89,17 @@ jobs:
 
       - name: Smoke test
         run: |
-          docker run -d --name api-flow-tester -p 8080:8080 api-flow-tester:ci
+          docker run -d --name runway -p 8080:8080 runway:ci
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:8080/api/health; then
               echo
-              docker stop api-flow-tester
+              docker stop runway
               exit 0
             fi
             sleep 1
           done
-          docker logs api-flow-tester
-          docker stop api-flow-tester || true
+          docker logs runway
+          docker stop runway || true
           exit 1
 
       - name: Push image
