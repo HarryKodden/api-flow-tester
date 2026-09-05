@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# HTTP/API regression and optional ApacheBench runner
+# RunWay CLI runner (HTTP/API regression + optional ApacheBench)
 # Requires: ab, curl, python3
 
 HOST=""

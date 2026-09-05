@@ -9,7 +9,7 @@ def test_health_and_index(client):
     assert health.json()["status"] == "ok"
     page = client.get("/")
     assert page.status_code == 200
-    assert "API Flow Tester" in page.text or "Regression" in page.text or "suite" in page.text.lower()
+    assert "RunWay" in page.text
 
 
 def test_me_uses_local_user_when_oidc_is_unset(client):

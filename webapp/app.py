@@ -139,7 +139,7 @@ class NoStoreAPICacheMiddleware:
         await self.app(scope, receive, send_wrapper)
 
 
-app = FastAPI(title="Regression Tester", version=RELEASE, lifespan=lifespan)
+app = FastAPI(title="RunWay", version=RELEASE, lifespan=lifespan)
 app.include_router(workspace_router)
 app.include_router(explorer_router)
 app.add_middleware(NoStoreAPICacheMiddleware)

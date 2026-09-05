@@ -1,8 +1,8 @@
-# API Flow Tester
+# RunWay
 
-HTTP/API regression facility: suites, scenarios, and one-pass runs with a web UI.
+HTTP/API regression facility: collections, scenarios, and one-pass runs with a web UI.
 
-The CLI entrypoint is still `bin/run.sh`. The product is a regression tester, not a load tester.
+The CLI entrypoint is `bin/run.sh`. RunWay is a regression tester, not a load tester.
 
 ## Features
 - Collection → scenario → step tests with payload templating and named environments

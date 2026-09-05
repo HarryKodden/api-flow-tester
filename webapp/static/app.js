@@ -64,10 +64,10 @@ const curlDialogEditor = document.getElementById('curl-dialog-editor');
 const regressionRunButton = document.getElementById('regression-run');
 const scenarioBaseUrlWrap = document.getElementById('scenario-base-url-wrap');
 const runTargetHint = document.getElementById('run-target-hint');
-const THEME_STORAGE_KEY = 'lti.theme';
+const THEME_STORAGE_KEY = 'runway.theme';
 const THEME_DEFAULT = 'dark';
-const ENV_OVERRIDE_STORAGE_KEY = 'lti.env.overrides';
-const ENV_REMOVED_STORAGE_KEY = 'lti.env.removed';
+const ENV_OVERRIDE_STORAGE_KEY = 'runway.env.overrides';
+const ENV_REMOVED_STORAGE_KEY = 'runway.env.removed';
 const runSpinner = document.getElementById('run-spinner');
 const runProgressWrap = document.getElementById('run-progress-wrap');
 const runProgressBar = document.getElementById('run-progress-bar');
@@ -87,7 +87,7 @@ let currentAccess = null;
 let collectionMemberDocs = new Map();
 let collectionMemberDocsCollection = '';
 let collectionMemberDocsLoading = null;
-const LAST_OPEN_STORAGE_KEY = 'lti.last.open';
+const LAST_OPEN_STORAGE_KEY = 'runway.last.open';
 let scenarioTree = {type: 'dir', name: 'examples', path: '', children: []};
 let expandedFolders = new Set();
 let expandedCollections = new Set();
@@ -4561,7 +4561,7 @@ async function startRun() {
 
 function getStoredTheme() {
   try {
-    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    const stored = localStorage.getItem(THEME_STORAGE_KEY) || localStorage.getItem('lti.theme');
     return stored === 'light' || stored === 'dark' ? stored : THEME_DEFAULT;
   } catch {
     return THEME_DEFAULT;

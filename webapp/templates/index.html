@@ -3,11 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Regression Tester</title>
+    <title>RunWay</title>
     <script>
       (function () {
         try {
-          var theme = localStorage.getItem('lti.theme');
+          var theme = localStorage.getItem('runway.theme') || localStorage.getItem('lti.theme');
           document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
         } catch (e) {
           document.documentElement.dataset.theme = 'dark';
@@ -22,7 +22,7 @@
   <body data-release="{{ release }}">
     <header class="topbar">
       <div class="brand">
-        <div class="brand-mark">Regression <span>Tester</span></div>
+        <div class="brand-mark">Run<span>Way</span></div>
         <div class="brand-sub">Collections, scenarios, one-pass runs</div>
       </div>
       <div class="topbar-actions">

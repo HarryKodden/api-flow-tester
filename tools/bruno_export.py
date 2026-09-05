@@ -1,4 +1,4 @@
-"""Convert API Flow Tester collections into Bruno collection JSON.
+"""Convert RunWay collections into Bruno collection JSON.
 
 The output matches the in-memory Bruno collection shape produced by
 @usebruno/converters (Import → Bruno Collection in the Bruno app).
