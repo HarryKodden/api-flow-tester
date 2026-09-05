@@ -12,7 +12,6 @@ REQUESTS=5000
 TARGET_RPS=500
 TARGET_USERS=100
 OUTPUT_DIR="./results"
-LABEL="baseline"
 ENDPOINTS="/health,/config,/api/users/me"
 SCENARIO_FILE=""
 SCENARIO_USERS=20
@@ -28,7 +27,7 @@ ORIGINAL_CMD="${ORIGINAL_CMD% }"
 
 usage() {
   cat <<'EOF'
-Usage: ./bin/test.sh [options]
+Usage: ./bin/run.sh [options]
 
 Options:
   --host <host>              target host (IP or FQDN, not localhost)
@@ -39,7 +38,6 @@ Options:
   --target-rps <n>           target RPS goal (default: 500)
   --target-users <n>         target concurrent users goal (default: 100)
   --endpoints <csv>          comma-separated endpoints (default: /health,/config,/api/users/me)
-  --label <name>             run label (default: baseline)
   --output-dir <path>        result root dir (default: ./results)
   --scenario-file <path>     JSON scenario file for chained API workflows
   --scenario-users <n>       virtual users for scenario execution (default: 20)
@@ -64,7 +62,6 @@ while [[ $# -gt 0 ]]; do
     --target-rps) TARGET_RPS="$2"; shift 2 ;;
     --target-users) TARGET_USERS="$2"; shift 2 ;;
     --endpoints) ENDPOINTS="$2"; shift 2 ;;
-    --label) LABEL="$2"; shift 2 ;;
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
     --scenario-file) SCENARIO_FILE="$2"; shift 2 ;;
     --scenario-users) SCENARIO_USERS="$2"; shift 2 ;;
@@ -79,9 +76,6 @@ while [[ $# -gt 0 ]]; do
       SCENARIO_STRICT=true
       SCENARIO_USERS=1
       SCENARIO_ITERATIONS=1
-      if [[ "$LABEL" == "baseline" ]]; then
-        LABEL="regression"
-      fi
       shift 1
       ;;
     -h|--help) usage; exit 0 ;;
@@ -123,7 +117,7 @@ else
   BASE_URL=""
 fi
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RUN_DIR="${OUTPUT_DIR}/${TIMESTAMP}_${LABEL}"
+RUN_DIR="${OUTPUT_DIR}/${TIMESTAMP}"
 mkdir -p "$RUN_DIR"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; RESET='\033[0m'
@@ -251,7 +245,6 @@ command_json=${command_json//\"/\\\"}
 {
   echo "{"
   echo "  \"timestamp\": \"${TIMESTAMP}\"," 
-  echo "  \"label\": \"${LABEL}\"," 
   echo "  \"target\": \"${BASE_URL}\"," 
   echo "  \"command\": \"${command_json}\"," 
   echo "  \"targets\": {\"rps\": ${TARGET_RPS}, \"users\": ${TARGET_USERS}},"

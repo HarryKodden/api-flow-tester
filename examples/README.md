@@ -25,11 +25,10 @@ Or from the CLI (after setting `user_id` in the suite env or via `--extra-env-fi
 
 ```bash
 printf '%s\n' '{"user_id":"1"}' > /tmp/demo-env.json
-./bin/test.sh \
+./bin/run.sh \
   --scenario-file ./examples/demo/suite.json \
   --scenario-extra-env /tmp/demo-env.json \
-  --regression \
-  --label demo
+  --regression
 ```
 
 API hosts must be an IP or FQDN, not localhost.

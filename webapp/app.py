@@ -7,7 +7,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1093,7 +1092,6 @@ def start_run(
     if not scenario_file:
         raise HTTPException(status_code=400, detail="scenario_file is required")
 
-    label = payload.get("label") or f"web_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     scheme = payload.get("scheme", "http")
     host = str(payload.get("host") or "").strip()
     port = str(payload.get("port") or "").strip()
@@ -1111,8 +1109,6 @@ def start_run(
         scenario_iterations = "1"
         if int(float(scenario_duration or 0)) < 60:
             scenario_duration = "60"
-        if not payload.get("label"):
-            label = "regression"
 
     workspace_run = is_workspace_path(str(scenario_file))
     if workspace_run and user is None:
@@ -1130,7 +1126,7 @@ def start_run(
             stored = load_collection_env_values(db, user, collection_id, scenario_environment)
             overrides = {**stored, **{str(k): v for k, v in overrides.items()}}
         cmd = [
-            str(BIN_DIR / "test.sh"),
+            str(BIN_DIR / "run.sh"),
             "--scheme", str(scheme),
             "--scenario-file", run_file,
             "--scenario-users", scenario_users,
@@ -1141,7 +1137,6 @@ def start_run(
             *(["--host", host] if host else []),
             *(["--port", port] if port else []),
             *(["--scenario-environment", scenario_environment] if scenario_environment else []),
-            "--label", label,
         ]
         if regression:
             cmd.append("--regression")

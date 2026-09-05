@@ -23,7 +23,7 @@ COPY alembic.ini .
 COPY alembic/ alembic/
 
 RUN mkdir -p /app/results /app/data \
-    && chmod +x /app/bin/test.sh
+    && chmod +x /app/bin/run.sh
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

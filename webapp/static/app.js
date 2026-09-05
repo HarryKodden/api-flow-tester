@@ -4482,9 +4482,6 @@ async function startRun() {
     return;
   }
 
-  const formLabel = document.getElementById('run-label').value.trim();
-  const label = formLabel || 'regression';
-
   setRunButtonsDisabled(true);
   runSpinner.classList.remove('hidden');
   runOutput.textContent = 'Running tests…';
@@ -4517,7 +4514,6 @@ async function startRun() {
     scenario_iterations: 1,
     scenario_environment: getSelectedEnvironmentName(),
     environment_overrides: environmentOverridesPayload(),
-    label,
     regression: true,
   };
   let runFailed = false;

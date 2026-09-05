@@ -2,7 +2,7 @@
 
 HTTP/API regression facility: suites, scenarios, and one-pass runs with a web UI.
 
-The CLI entrypoint is still `bin/test.sh`. The product is a regression tester, not a load tester.
+The CLI entrypoint is still `bin/run.sh`. The product is a regression tester, not a load tester.
 
 ## Features
 - Collection → scenario → step tests with payload templating and named environments
@@ -18,7 +18,7 @@ The CLI entrypoint is still `bin/test.sh`. The product is a regression tester, n
 - Live run UX with spinner and a pass/fail list
 
 ## Repository Layout
-- `bin/test.sh` - runner (use `--regression` for the UI/CLI default)
+- `bin/run.sh` - runner (use `--regression` for the UI/CLI default)
 - `tools/scenario_runner.py` - scenario/suite engine
 - `webapp/app.py` - FastAPI backend
 - `webapp/templates/` - frontend HTML
@@ -34,7 +34,7 @@ cd api-flow-tester
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-chmod +x bin/test.sh
+chmod +x bin/run.sh
 ```
 
 Run the test suite:
@@ -105,10 +105,9 @@ Migrations run on startup (`alembic upgrade head`). Runs stay ephemeral and are 
 Run a suite (one pass, fail on errors):
 
 ```bash
-./bin/test.sh \
+./bin/run.sh \
   --scenario-file ./examples/demo/suite.json \
-  --regression \
-  --label demo
+  --regression
 ```
 
 Run a single scenario the same way, pointing `--scenario-file` at a `test_*.json`.
@@ -121,34 +120,32 @@ The CLI can still drive optional ApacheBench probes. That is not exposed in the 
 Run default HTTP probe:
 
 ```bash
-./bin/test.sh --host 192.168.1.10 --port 8080 --label baseline_eventlet
+./bin/run.sh --host 192.168.1.10 --port 8080
 ```
 
 Run with custom targets:
 
 ```bash
-./bin/test.sh \
+./bin/run.sh \
   --host 192.168.1.10 \
   --port 8080 \
   --concurrency 100 \
   --requests 10000 \
   --target-rps 3000 \
   --target-users 150 \
-  --endpoints "/health,/config,/api/users/me" \
-  --label gthread_workers_8
+  --endpoints "/health,/config,/api/users/me"
 ```
 
 Run a scenario as a load test (not regression):
 
 ```bash
-./bin/test.sh \
+./bin/run.sh \
   --host 192.168.1.10 \
   --port 8080 \
   --scenario-file ./examples/scenario.json \
   --scenario-users 30 \
   --scenario-duration 45 \
-  --scenario-iterations 0 \
-  --label scenario_run
+  --scenario-iterations 0
 ```
 
 </details>
@@ -308,12 +305,11 @@ The `server` key in an environment overrides `base_url` for URL construction. Al
 Pass `--scenario-environment` to the shell runner:
 
 ```bash
-./bin/test.sh \
+./bin/run.sh \
   --scenario-file ./examples/SCIM.json \
   --scenario-environment staging \
   --scenario-users 10 \
-  --scenario-duration 30 \
-  --label scim_staging
+  --scenario-duration 30
 ```
 
 If `--scenario-environment` is omitted the value of `selected_environment` in the scenario file is used.
