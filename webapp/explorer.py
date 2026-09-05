@@ -834,6 +834,7 @@ def share_collection(
     path = str(payload.get("path") or "").strip()
     recipient_id = str(payload.get("user_id") or "").strip()
     permission = normalize_share_permission(payload.get("permission") or "read")
+    share_environment = bool(payload.get("share_environment"))
     if not path:
         raise HTTPException(status_code=400, detail="path is required")
     if not recipient_id:
@@ -861,6 +862,7 @@ def share_collection(
         owner=user,
         recipient=recipient,
         permission=permission,
+        share_environment=share_environment,
     )
     return {
         "status": "shared",
@@ -869,9 +871,24 @@ def share_collection(
         "recipient_id": recipient.id,
         "recipient_name": recipient.name or recipient.email or recipient.id,
         "permission": share.permission,
+        "share_environment": bool(share.share_environment),
         "collection_id": collection.id,
         "collection_path": workspace_collection_path(collection.id),
         "name": collection.name,
+    }
+
+
+def _share_payload(share: CollectionShare) -> dict[str, Any]:
+    recipient = share.recipient
+    return {
+        "user_id": share.user_id,
+        "user_name": (recipient.name if recipient else "")
+        or (recipient.email if recipient else "")
+        or share.user_id,
+        "user_email": (recipient.email if recipient else "") or "",
+        "permission": normalize_share_permission(share.permission),
+        "share_environment": bool(share.share_environment),
+        "created_at": share.created_at.isoformat() if share.created_at else "",
     }
 
 
@@ -895,18 +912,46 @@ def list_collection_shares(
     ).all()
     return {
         "collection_id": collection.id,
-        "shares": [
-            {
-                "user_id": share.user_id,
-                "user_name": (share.recipient.name if share.recipient else "")
-                or (share.recipient.email if share.recipient else "")
-                or share.user_id,
-                "permission": normalize_share_permission(share.permission),
-                "created_at": share.created_at.isoformat() if share.created_at else "",
-            }
-            for share in shares
-        ],
+        "collection_path": workspace_collection_path(collection.id),
+        "name": collection.name,
+        "shares": [_share_payload(share) for share in shares],
     }
+
+
+@router.patch("/collection-shares")
+def update_collection_share(
+    payload: dict[str, Any],
+    user: User = Depends(current_user_required),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    path = str(payload.get("path") or "").strip()
+    recipient_id = str(payload.get("user_id") or "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    if not recipient_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if not is_workspace_path(path):
+        raise HTTPException(status_code=400, detail="Shares are only available for workspace collections")
+    collection_id, filename = parse_workspace_path(path)
+    if not is_collection_filename(filename):
+        raise HTTPException(status_code=400, detail="Shares are only available for collections")
+    collection = owned_collection(db, user, collection_id)
+    share = get_share_for_user(db, collection.id, recipient_id)
+    if share is None:
+        raise HTTPException(status_code=404, detail="Share not found")
+    if "permission" in payload:
+        share.permission = normalize_share_permission(payload.get("permission"))
+    if "share_environment" in payload:
+        share.share_environment = bool(payload.get("share_environment"))
+    db.flush()
+    db.refresh(share)
+    if share.recipient is None:
+        share = db.scalar(
+            select(CollectionShare)
+            .options(selectinload(CollectionShare.recipient))
+            .where(CollectionShare.id == share.id)
+        )
+    return {"status": "updated", "share": _share_payload(share)}
 
 
 @router.delete("/collection-shares")

@@ -646,6 +646,85 @@ html[data-theme="light"] .icon-moon { display: none; }
   flex: 0 0 auto;
 }
 
+.json-dialog-card.shares-dialog-card {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.share-table-head {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.4fr) minmax(120px, 1fr) minmax(140px, 1fr) auto;
+  gap: 10px;
+  padding: 0 10px 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.shares-list {
+  display: grid;
+  gap: 10px;
+  max-height: min(50vh, 420px);
+  overflow: auto;
+  margin: 0 0 16px;
+}
+
+.share-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.4fr) minmax(120px, 1fr) minmax(140px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.share-row-add {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.share-row-identity {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  align-content: center;
+}
+
+.share-row-identity strong,
+.share-row-identity span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-row-field {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.share-row-field select {
+  width: 100%;
+}
+
+.share-row > button {
+  align-self: end;
+  min-width: 88px;
+}
+
+@media (max-width: 720px) {
+  .share-table-head {
+    display: none;
+  }
+
+  .share-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+}
+
 .tree-row.kind-collection .tree-icon {
   color: var(--kind-collection-fg);
 }

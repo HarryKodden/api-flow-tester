@@ -3216,7 +3216,7 @@ function explorerMenuItems(target) {
     const canEdit = permission === 'owner' || permission === 'edit';
     const isOwner = permission === 'owner' && target.source !== 'shared';
     if (isOwner && target.source === 'workspace') {
-      items.push({label: 'Share…', action: () => shareCollectionWithUser(target.path)});
+      items.push({label: 'Share…', action: () => openSharesDialog(target.path)});
     }
     if (isWorkspacePath(target.path)) {
       if (target.source === 'shared' || !isOwner) {
@@ -3587,15 +3587,201 @@ function userPickerLabel(user) {
   return name || email || String(user?.id || 'User');
 }
 
-function askUserLater(options) {
-  return new Promise((resolve) => {
-    window.setTimeout(() => {
-      void askUser(options).then(resolve);
-    }, 0);
+function parseShareEnvironmentChoice(value) {
+  return String(value || '').toLowerCase() === 'yes';
+}
+
+function closeSharesDialog() {
+  document.getElementById('shares-dialog')?.classList.add('hidden');
+}
+
+async function updateShareSettings(path, userId, patch) {
+  return api('/api/explorer/collection-shares', {
+    method: 'PATCH',
+    body: JSON.stringify({path, user_id: userId, ...patch}),
   });
 }
 
-async function shareCollectionWithUser(path) {
+async function revokeShare(path, userId) {
+  const query = new URLSearchParams({path, user_id: userId});
+  return api(`/api/explorer/collection-shares?${query.toString()}`, {method: 'DELETE'});
+}
+
+function fillSelect(select, options, selectedValue) {
+  select.innerHTML = '';
+  options.forEach((option) => {
+    const el = document.createElement('option');
+    el.value = option.value;
+    el.textContent = option.label;
+    if (String(option.value) === String(selectedValue)) {
+      el.selected = true;
+    }
+    select.appendChild(el);
+  });
+}
+
+function createShareField(labelText, control) {
+  const label = document.createElement('label');
+  label.className = 'share-row-field';
+  const caption = document.createElement('span');
+  caption.textContent = labelText;
+  label.append(caption, control);
+  return label;
+}
+
+function renderSharesDialog(path, shares, users) {
+  const list = document.getElementById('shares-dialog-list');
+  if (!list) {
+    return;
+  }
+  list.innerHTML = '';
+  const sharedIds = new Set((shares || []).map((share) => share.user_id));
+
+  (shares || []).forEach((share) => {
+    const row = document.createElement('div');
+    row.className = 'share-row';
+
+    const identity = document.createElement('div');
+    identity.className = 'share-row-identity';
+    const name = document.createElement('strong');
+    name.textContent = share.user_name || share.user_id;
+    identity.appendChild(name);
+    if (share.user_email && share.user_email !== share.user_name) {
+      const email = document.createElement('span');
+      email.className = 'muted';
+      email.textContent = share.user_email;
+      identity.appendChild(email);
+    }
+
+    const permissionSelect = document.createElement('select');
+    fillSelect(permissionSelect, [
+      {value: 'read', label: 'Can view'},
+      {value: 'edit', label: 'Can edit'},
+    ], share.permission || 'read');
+    permissionSelect.addEventListener('change', () => {
+      void updateShareSettings(path, share.user_id, {permission: permissionSelect.value})
+        .then((result) => {
+          share.permission = result.share?.permission || permissionSelect.value;
+        })
+        .catch((error) => {
+          alert(error.message || String(error));
+          permissionSelect.value = share.permission || 'read';
+        });
+    });
+
+    const envSelect = document.createElement('select');
+    fillSelect(envSelect, [
+      {value: 'no', label: 'No'},
+      {value: 'yes', label: 'Yes'},
+    ], share.share_environment ? 'yes' : 'no');
+    envSelect.addEventListener('change', () => {
+      const shareEnvironment = parseShareEnvironmentChoice(envSelect.value);
+      void updateShareSettings(path, share.user_id, {share_environment: shareEnvironment})
+        .then((result) => {
+          share.share_environment = Boolean(result.share?.share_environment);
+        })
+        .catch((error) => {
+          alert(error.message || String(error));
+          envSelect.value = share.share_environment ? 'yes' : 'no';
+        });
+    });
+
+    const withdraw = document.createElement('button');
+    withdraw.type = 'button';
+    withdraw.className = 'ghost danger-subtle';
+    withdraw.textContent = 'Withdraw';
+    withdraw.addEventListener('click', () => {
+      if (!window.confirm(`Withdraw share from ${share.user_name || 'this user'}?`)) {
+        return;
+      }
+      void revokeShare(path, share.user_id)
+        .then(() => openSharesDialog(path))
+        .catch((error) => alert(error.message || String(error)));
+    });
+
+    row.append(
+      identity,
+      createShareField('Access', permissionSelect),
+      createShareField('Shared environment', envSelect),
+      withdraw,
+    );
+    list.appendChild(row);
+  });
+
+  const availableUsers = (users || []).filter((user) => !sharedIds.has(user.id));
+  const addRow = document.createElement('div');
+  addRow.className = 'share-row share-row-add';
+
+  const personSelect = document.createElement('select');
+  if (!availableUsers.length) {
+    fillSelect(personSelect, [{value: '', label: 'No more users to share with'}], '');
+    personSelect.disabled = true;
+  } else {
+    fillSelect(
+      personSelect,
+      availableUsers.map((user) => ({value: user.id, label: userPickerLabel(user)})),
+      availableUsers[0].id,
+    );
+  }
+
+  const permissionSelect = document.createElement('select');
+  fillSelect(permissionSelect, [
+    {value: 'read', label: 'Can view'},
+    {value: 'edit', label: 'Can edit'},
+  ], 'read');
+
+  const envSelect = document.createElement('select');
+  fillSelect(envSelect, [
+    {value: 'no', label: 'No'},
+    {value: 'yes', label: 'Yes'},
+  ], 'no');
+
+  const addButton = document.createElement('button');
+  addButton.type = 'button';
+  addButton.className = 'primary';
+  addButton.textContent = 'Add';
+  addButton.disabled = !availableUsers.length;
+  addButton.addEventListener('click', () => {
+    const userId = personSelect.value;
+    if (!userId) {
+      return;
+    }
+    addButton.disabled = true;
+    void api('/api/explorer/share-collection', {
+      method: 'POST',
+      body: JSON.stringify({
+        path,
+        user_id: userId,
+        permission: permissionSelect.value || 'read',
+        share_environment: parseShareEnvironmentChoice(envSelect.value),
+      }),
+    })
+      .then((shared) => {
+        expandedFolders.add('shared');
+        if (runOutput) {
+          const envLabel = shared.share_environment ? 'environment shared' : 'environment not shared';
+          runOutput.textContent =
+            `Shared “${shared.name || fileLabel(path)}” with ${shared.recipient_name || 'user'} ` +
+            `(${shared.permission || 'read'}, ${envLabel}).`;
+        }
+        return Promise.all([loadScenarios(), openSharesDialog(path)]);
+      })
+      .catch((error) => {
+        addButton.disabled = false;
+        alert(error.message || String(error));
+      });
+  });
+
+  addRow.append(
+    createShareField('Person', personSelect),
+    createShareField('Access', permissionSelect),
+    createShareField('Shared environment', envSelect),
+    addButton,
+  );
+  list.appendChild(addRow);
+}
+
+async function openSharesDialog(path) {
   try {
     if (!authState.authenticated) {
       throw new Error(requireSignInMessage());
@@ -3604,49 +3790,25 @@ async function shareCollectionWithUser(path) {
     if (!isWorkspacePath(sharePath)) {
       throw new Error('Copy the collection to your workspace first, then share it from My workspace.');
     }
-    const data = await api('/api/users');
-    const options = (data.users || []).map((user) => ({
-      value: user.id,
-      label: userPickerLabel(user),
-    }));
-    if (!options.length) {
-      throw new Error('No other registered users are available to share with.');
+    const dialog = document.getElementById('shares-dialog');
+    const title = document.getElementById('shares-dialog-title');
+    const help = document.getElementById('shares-dialog-help');
+    if (!dialog) {
+      throw new Error('Shares dialog is unavailable.');
     }
-    const userId = await askUser({
-      title: 'Share collection',
-      help: 'They get live access under Shared with me — not a separate copy.',
-      confirmLabel: 'Next',
-      options,
-      emptyLabel: 'No other registered users.',
-    });
-    if (!userId) {
-      return;
+    const [shareData, usersData] = await Promise.all([
+      api(`/api/explorer/collection-shares?path=${encodeURIComponent(sharePath)}`),
+      api('/api/users'),
+    ]);
+    if (title) {
+      title.textContent = `Share: ${shareData.name || fileLabel(sharePath)} ...`;
     }
-    const permission = await askUserLater({
-      title: 'Share permission',
-      help: 'Can view: read-only. Can edit: change scenarios and collection details.',
-      confirmLabel: 'Share',
-      options: [
-        {value: 'read', label: 'Can view'},
-        {value: 'edit', label: 'Can edit'},
-      ],
-    });
-    if (!permission) {
-      return;
+    if (help) {
+      help.textContent = 'Existing shares below. Use the last row to add someone.';
     }
-    const shared = await api('/api/explorer/share-collection', {
-      method: 'POST',
-      body: JSON.stringify({path: sharePath, user_id: userId, permission}),
-    });
-    expandedFolders.add('shared');
-    await loadScenarios();
-    const message =
-      `Shared “${shared.name || fileLabel(sharePath)}” with ${shared.recipient_name || 'user'} ` +
-      `(${shared.permission || permission}). They will see it under Shared with me.`;
-    if (runOutput) {
-      runOutput.textContent = message;
-    }
-    window.alert(message);
+    renderSharesDialog(sharePath, shareData.shares || [], usersData.users || []);
+    dialog.dataset.path = sharePath;
+    dialog.classList.remove('hidden');
   } catch (error) {
     alert(error.message || String(error));
   }
@@ -4541,9 +4703,12 @@ if (copyCollectionButton) {
 }
 if (shareCollectionButton) {
   shareCollectionButton.addEventListener('click', () => {
-    void shareCollectionWithUser(activeCollectionPath || selectedScenarioName);
+    void openSharesDialog(activeCollectionPath || selectedScenarioName);
   });
 }
+document.getElementById('shares-dialog-close')?.addEventListener('click', closeSharesDialog);
+document.getElementById('shares-dialog-close-top')?.addEventListener('click', closeSharesDialog);
+document.getElementById('shares-dialog')?.querySelector('.json-dialog-backdrop')?.addEventListener('click', closeSharesDialog);
 if (deleteCollectionButton) {
   deleteCollectionButton.addEventListener('click', () => {
     void deleteOpenCollection();

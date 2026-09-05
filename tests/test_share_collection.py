@@ -75,6 +75,7 @@ def test_live_share_workspace_collection(client):
     assert body["permission"] == "edit"
     assert body["recipient_id"] == other.id
     assert body["collection_id"] == collection_id
+    assert body.get("share_environment") is False
 
     with SessionLocal() as db:
         share = db.scalar(
@@ -85,6 +86,7 @@ def test_live_share_workspace_collection(client):
         )
         assert share is not None
         assert share.permission == "edit"
+        assert share.share_environment is False
         assert db.scalar(select(Collection).where(Collection.owner_id == other.id)) is None
 
     _as_user(client, other.id)
@@ -232,3 +234,108 @@ def test_fork_diff_and_sync(client):
     assert synced.json()["status"] == "synced"
     after = client.get(f"/api/explorer/diff-collection?path={fork_path}")
     assert after.json()["identical"] is True
+
+
+def test_share_environment_uses_owner_values(client):
+    other = _create_other_user()
+    created = client.post(
+        "/api/explorer/create",
+        json={"kind": "collection", "name": _name("EnvShare"), "target": "workspace"},
+    )
+    assert created.status_code == 200
+    collection_path = created.json()["path"]
+    collection_id = created.json()["id"]
+
+    client.post(
+        f"/api/workspace/file?path={collection_path}",
+        json={
+            "name": created.json()["name"],
+            "scenarios": [],
+            "steps": [],
+            "selected_environment": "staging",
+            "environments": {"staging": {"base_url": "https://example.test"}},
+        },
+    )
+    saved_env = client.put(
+        f"/api/workspace/collections/{collection_id}/env",
+        json={"environment": "staging", "values": {"token": "owner-secret"}},
+    )
+    assert saved_env.status_code == 200
+
+    shared = client.post(
+        "/api/explorer/share-collection",
+        json={
+            "path": collection_path,
+            "user_id": other.id,
+            "permission": "read",
+            "share_environment": True,
+        },
+    )
+    assert shared.status_code == 200
+    assert shared.json()["share_environment"] is True
+
+    _as_user(client, other.id)
+    opened = client.get(f"/api/workspace/file?path={collection_path}")
+    assert opened.json()["_access"]["share_environment"] is True
+    env = client.get(f"/api/workspace/collections/{collection_id}/env?environment=staging")
+    assert env.status_code == 200
+    assert env.json()["values"]["token"] == "owner-secret"
+    assert env.json()["share_environment"] is True
+
+
+def test_manage_shares_update_and_revoke(client):
+    other = _create_other_user()
+    created = client.post(
+        "/api/explorer/create",
+        json={"kind": "collection", "name": _name("Manage"), "target": "workspace"},
+    )
+    assert created.status_code == 200
+    collection_path = created.json()["path"]
+
+    shared = client.post(
+        "/api/explorer/share-collection",
+        json={
+            "path": collection_path,
+            "user_id": other.id,
+            "permission": "read",
+            "share_environment": False,
+        },
+    )
+    assert shared.status_code == 200
+
+    listed = client.get(f"/api/explorer/collection-shares?path={collection_path}")
+    assert listed.status_code == 200
+    shares = listed.json()["shares"]
+    assert len(shares) == 1
+    assert shares[0]["permission"] == "read"
+    assert shares[0]["share_environment"] is False
+
+    updated = client.patch(
+        "/api/explorer/collection-shares",
+        json={
+            "path": collection_path,
+            "user_id": other.id,
+            "permission": "edit",
+            "share_environment": True,
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["share"]["permission"] == "edit"
+    assert updated.json()["share"]["share_environment"] is True
+
+    listed = client.get(f"/api/explorer/collection-shares?path={collection_path}")
+    assert listed.json()["shares"][0]["permission"] == "edit"
+    assert listed.json()["shares"][0]["share_environment"] is True
+
+    revoked = client.delete(
+        f"/api/explorer/collection-shares?path={collection_path}&user_id={other.id}"
+    )
+    assert revoked.status_code == 200
+    assert revoked.json()["status"] == "revoked"
+
+    listed = client.get(f"/api/explorer/collection-shares?path={collection_path}")
+    assert listed.json()["shares"] == []
+
+    _as_user(client, other.id)
+    blocked = client.get(f"/api/workspace/file?path={collection_path}")
+    assert blocked.status_code == 404

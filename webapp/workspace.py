@@ -141,6 +141,7 @@ def upsert_collection_share(
     owner: User,
     recipient: User,
     permission: str,
+    share_environment: bool = False,
 ) -> CollectionShare:
     if collection.owner_id != owner.id:
         raise HTTPException(status_code=403, detail="Only the owner can manage shares")
@@ -151,16 +152,80 @@ def upsert_collection_share(
     if existing is not None:
         existing.permission = cleaned
         existing.owner_id = owner.id
+        existing.share_environment = bool(share_environment)
         return existing
     share = CollectionShare(
         collection_id=collection.id,
         owner_id=owner.id,
         user_id=recipient.id,
         permission=cleaned,
+        share_environment=bool(share_environment),
     )
     db.add(share)
     db.flush()
     return share
+
+
+def share_environment_enabled(db: Session, user: User, collection: Collection) -> bool:
+    if collection.owner_id == user.id:
+        return False
+    share = get_share_for_user(db, collection.id, user.id)
+    return bool(share and share.share_environment)
+
+
+def env_values_owner_id(db: Session, user: User, collection: Collection) -> str:
+    """Owner of the env row to read/write for this user on the collection."""
+    if collection.owner_id == user.id:
+        return user.id
+    if share_environment_enabled(db, user, collection):
+        return collection.owner_id
+    return user.id
+
+
+def load_collection_env_values(db: Session, user: User, collection_id: str, environment: str) -> dict[str, str]:
+    collection = db.scalar(select(Collection).where(Collection.id == collection_id))
+    owner_id = user.id
+    if collection is not None:
+        owner_id = env_values_owner_id(db, user, collection)
+    row = db.scalar(
+        select(CollectionEnvValue).where(
+            CollectionEnvValue.collection_id == collection_id,
+            CollectionEnvValue.owner_id == owner_id,
+            CollectionEnvValue.environment_name == environment,
+        )
+    )
+    return string_env_map(row.values if row else {})
+
+
+def upsert_collection_env_values(
+    db: Session, user: User, collection: Collection, environment: str, values: Any
+) -> dict[str, str]:
+    cleaned = string_env_map(values)
+    owner_id = env_values_owner_id(db, user, collection)
+    # Read-only shares cannot write even when environments are shared for viewing.
+    if collection.owner_id != user.id:
+        share = get_share_for_user(db, collection.id, user.id)
+        if share is None or normalize_share_permission(share.permission) != "edit":
+            raise HTTPException(status_code=403, detail="Read-only share")
+    row = db.scalar(
+        select(CollectionEnvValue).where(
+            CollectionEnvValue.collection_id == collection.id,
+            CollectionEnvValue.owner_id == owner_id,
+            CollectionEnvValue.environment_name == environment,
+        )
+    )
+    if row is None:
+        row = CollectionEnvValue(
+            owner_id=owner_id,
+            collection_id=collection.id,
+            environment_name=environment,
+            values=cleaned,
+        )
+        db.add(row)
+    else:
+        row.values = cleaned
+        row.updated_at = utcnow()
+    return cleaned
 
 
 def accessible_collection(
@@ -546,42 +611,6 @@ def string_env_map(values: Any) -> dict[str, str]:
     return cleaned
 
 
-def load_collection_env_values(db: Session, user: User, collection_id: str, environment: str) -> dict[str, str]:
-    row = db.scalar(
-        select(CollectionEnvValue).where(
-            CollectionEnvValue.collection_id == collection_id,
-            CollectionEnvValue.owner_id == user.id,
-            CollectionEnvValue.environment_name == environment,
-        )
-    )
-    return string_env_map(row.values if row else {})
-
-
-def upsert_collection_env_values(
-    db: Session, user: User, collection: Collection, environment: str, values: Any
-) -> dict[str, str]:
-    cleaned = string_env_map(values)
-    row = db.scalar(
-        select(CollectionEnvValue).where(
-            CollectionEnvValue.collection_id == collection.id,
-            CollectionEnvValue.owner_id == user.id,
-            CollectionEnvValue.environment_name == environment,
-        )
-    )
-    if row is None:
-        row = CollectionEnvValue(
-            owner_id=user.id,
-            collection_id=collection.id,
-            environment_name=environment,
-            values=cleaned,
-        )
-        db.add(row)
-    else:
-        row.values = cleaned
-        row.updated_at = utcnow()
-    return cleaned
-
-
 def materialize_workspace_run(db: Session, user: User, path: str, dest_dir: Path) -> Path:
     collection_id, filename = parse_workspace_path(path)
     collection, _permission = accessible_collection(db, user, collection_id)
@@ -612,6 +641,7 @@ def get_workspace_file(
     collection, permission = accessible_collection(db, user, collection_id)
     if is_collection_filename(filename):
         document = collection_document_for_client(collection)
+        share_env = share_environment_enabled(db, user, collection)
         document["_access"] = {
             "permission": permission,
             "owner_id": collection.owner_id,
@@ -622,13 +652,18 @@ def get_workspace_file(
                 if collection.source_collection_id
                 else ""
             ),
+            "share_environment": share_env,
         }
         return document
     scenario = next((item for item in collection.scenarios if item.name == filename), None)
     if scenario is None:
         raise HTTPException(status_code=404, detail="Scenario not found")
     document = dict(scenario.document or {})
-    document["_access"] = {"permission": permission, "owner_id": collection.owner_id}
+    document["_access"] = {
+        "permission": permission,
+        "owner_id": collection.owner_id,
+        "share_environment": share_environment_enabled(db, user, collection),
+    }
     return document
 
 
@@ -824,6 +859,8 @@ def get_collection_env(
     return {
         "environment": env_name,
         "values": load_collection_env_values(db, user, collection.id, env_name),
+        "share_environment": share_environment_enabled(db, user, collection),
+        "env_owner_id": env_values_owner_id(db, user, collection),
     }
 
 

@@ -307,6 +307,29 @@
       </div>
     </div>
 
+    <div id="shares-dialog" class="json-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="shares-dialog-title">
+      <div class="json-dialog-backdrop" data-close="true"></div>
+      <div class="json-dialog-card shares-dialog-card">
+        <header class="modal-head section-head">
+          <div>
+            <h2 id="shares-dialog-title">Share collection</h2>
+            <p id="shares-dialog-help" class="muted">Live access under Shared with me — not a separate copy.</p>
+          </div>
+          <button id="shares-dialog-close-top" type="button" class="icon-btn">Close</button>
+        </header>
+        <div class="share-table-head" aria-hidden="true">
+          <span>Person</span>
+          <span>Access</span>
+          <span>Shared environment</span>
+          <span></span>
+        </div>
+        <div id="shares-dialog-list" class="shares-list"></div>
+        <div class="actions row-end">
+          <button id="shares-dialog-close" type="button" class="primary">Done</button>
+        </div>
+      </div>
+    </div>
+
     <div id="curl-dialog" class="json-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="curl-dialog-title">
       <div class="json-dialog-backdrop" data-close="true"></div>
       <div class="json-dialog-card ask-dialog-card">

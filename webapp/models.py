@@ -125,6 +125,7 @@ class CollectionShare(Base):
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     permission: Mapped[str] = mapped_column(String(16), default="read")
+    share_environment: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     collection: Mapped[Collection] = relationship(back_populates="shares")
